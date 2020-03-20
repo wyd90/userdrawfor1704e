@@ -9,7 +9,7 @@ import org.apache.hadoop.hbase.protobuf.generated.ClientProtos
 import org.apache.hadoop.hbase.util.{Base64, Bytes}
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
-import org.apache.spark.{SparkConf, SparkContext}
+import org.apache.spark.{Partitioner, SparkConf, SparkContext}
 
 import scala.collection.mutable
 
@@ -64,6 +64,10 @@ object UserDrawStatic {
 
     val mdnAndAppIdUseTimes: RDD[((String, String), Long)] = filtered.map(x => ((x._1,x._2),x._3)).reduceByKey(_ + _)
 
+    val logs: RDD[(String,(Double, Double, Double, Double, Double, Double, Double, String, Long,String))] = mdnAndAppIdUseTimes.map(x => {
+      (x._1._1,(-1d, -1d, -1d, -1d, -1d, -1d, -1d, x._1._2, x._2,"logmsg"))
+    })
+
 
     val hbaseConf = HBaseConfiguration.create()
     hbaseConf.set("hbase.zookeeper.quorum","node4:2181")
@@ -78,7 +82,7 @@ object UserDrawStatic {
       , classOf[TableInputFormat]
       , classOf[ImmutableBytesWritable]
       , classOf[Result])
-    val fromhbase: RDD[(String, (Double, Double, Double, Double, Double, Double,Double))] = userDrawData.map(x => {
+    val fromhbase: RDD[(String,(Double, Double, Double, Double, Double, Double,Double,String,Long,String))] = userDrawData.map(x => {
       val rowKey = Bytes.toString(x._1.get(), x._1.getOffset, x._1.getLength)
       val maleByte: Array[Byte] = x._2.getValue(Bytes.toBytes("f1"), Bytes.toBytes("male"))
       val femaleByte: Array[Byte] = x._2.getValue(Bytes.toBytes("f1"), Bytes.toBytes("female"))
@@ -95,41 +99,96 @@ object UserDrawStatic {
         , Bytes.toDouble(age2Byte)
         , Bytes.toDouble(age3Byte)
         , Bytes.toDouble(age4Byte)
-        , Bytes.toDouble(age5Byte)))
+        , Bytes.toDouble(age5Byte)
+        ,"NULL"    //appId
+        ,-1L
+        ,"hbasemsg"))      //times
     })
 
-    val groupByMdn: RDD[(String, (String, Long))] = mdnAndAppIdUseTimes.map(x => {
-      (x._1._1, (x._1._2, x._2))
-    })
+    val datas: RDD[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long,String))] = logs.union(fromhbase)
 
-    val joined: RDD[(String, ((String, Long), Option[(Double, Double, Double, Double, Double, Double, Double)]))] = groupByMdn.leftOuterJoin(fromhbase)
-
-    joined.map(x => {
-
-      val mdn = x._1
-      val logData = (x._2)._1
-      val fromhbaseDataOP = (x._2)._2
-
-      val fromHBaseData = fromhbaseDataOP.getOrElse((-1d,-1d,-1d,-1d,-1d,-1d,-1d))
-      val userDraw = new UserDraw(mdn)
-      if(fromHBaseData._1 ne -1d) {
-        //hbase中没有该用户的画像
-
-      } else {
-        //hhase中有该用户的画像
+    implicit val userOrdering = new Ordering[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long,String))] {
+      override def compare(x: (String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String)), y: (String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String))): Int = {
+        if(x._1.compareTo(y._1) == 0) {
+          if(x._2._10.compareTo(y._2._10) == 0) {
+            if(y._2._10 eq "hbasemsg") {
+              1
+            } else {
+              -1
+            }
+          } else {
+            x._2._8.compareTo(y._2._8)
+          }
+        } else {
+          x._1.compareTo(y._1)
+        }
       }
+    }
 
+    val partitioned: RDD[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String))] = datas.repartitionAndSortWithinPartitions(new MyPartitioner(500))
 
-      val tag: (String, String, Double, Double, Double, Double, Double, Double, Double) = rule.get(log._1).getOrElse(("NULL","NULL",-1d,-1d,-1d,-1d,-1d,-1d,-1d))
-      if(!"NULL".equals(tag._1)) {
+    val userDrawRes: RDD[UserDraw] = partitioned.mapPartitions(it => {
+      var oldmdn = ""
+      //获取用户画像标签库
+      val rule = ruleMapBroad.value
+      val userDraws = new collection.mutable.ListBuffer[UserDraw]
+      var userDraw: UserDraw = null;
+      it.foreach(x => {
+        if (x._1 ne oldmdn) {
+          //新开始的一组了
+          oldmdn = x._1
+          if (userDraw != null) {
+            val toAddUserDraw = new UserDraw(userDraw.mdn, userDraw.male, userDraw.female, userDraw.age1, userDraw.age2, userDraw.age3, userDraw.age4, userDraw.age5)
+            userDraws.append(toAddUserDraw)
+          }
+          userDraw = new UserDraw(x._1)
+          if (x._2._10 eq "hbasemsg") {
+            //hbase中有之前的用户画像
+            userDraw.male = x._2._1
+            userDraw.female = x._2._2
+            userDraw.age1 = x._2._3
+            userDraw.age2 = x._2._4
+            userDraw.age3 = x._2._5
+            userDraw.age4 = x._2._6
+            userDraw.age5 = x._2._7
+          } else {
+            //hbase中没有用户画像，开始画像
+            rule.get(x._2._8) match {
+              case Some(a) => {
+                userDraw.protraitSex(a._3, a._4, x._2._9)
+                userDraw.protraitAge(a._5, a._6, a._7, a._8, a._9, x._2._9)
+              }
+              case None =>
+            }
+          }
+        } else {
+          //是同一组
+          rule.get(x._2._8) match {
+            case Some(a) => {
+              userDraw.protraitSex(a._3, a._4, x._2._9)
+              userDraw.protraitAge(a._5, a._6, a._7, a._8, a._9, x._2._9)
+            }
+            case None =>
+          }
+        }
+      })
 
-      }
-
-
+      userDraws.toIterator
     })
-
+    userDrawRes.take(10)
+    //TODO save hbase ...
     sc.stop()
 
   }
 
+}
+
+class MyPartitioner(partitionNum: Int) extends Partitioner {
+
+  override def numPartitions: Int = partitionNum
+
+  override def getPartition(key: Any): Int = {
+    val mdn = key.asInstanceOf[String]
+    Math.abs(mdn.hashCode % partitionNum)
+  }
 }
