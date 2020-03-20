@@ -42,16 +42,16 @@ object UserDrawStatic {
     val maped: RDD[(String, String, Long)] = text.map(line => {
       val arr: Array[String] = line.split("[|]")
       var mdn = "NULL"
-      var appId = "NULL"
+      var appId = 0
       var times = -1L;
       try {
         mdn = arr(0)
-        appId = arr(15)
+        appId = arr(15).toInt
         times = arr(12).toLong
       } catch {
         case _: Exception =>
       }
-      (mdn, appId, times)
+      (mdn, ""+appId, times)
     })
 
     val filtered = maped.filter(x => {
@@ -107,17 +107,21 @@ object UserDrawStatic {
 
     val datas: RDD[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long,String))] = logs.union(fromhbase)
 
+
+
+    val partitioned: RDD[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String))] = datas.partitionBy(new MyPartitioner(4))
+
     implicit val userOrdering = new Ordering[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long,String))] {
       override def compare(x: (String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String)), y: (String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String))): Int = {
         if(x._1.compareTo(y._1) == 0) {
           if(x._2._10.compareTo(y._2._10) == 0) {
-            if(y._2._10 eq "hbasemsg") {
+            x._2._8.compareTo(y._2._8)
+          } else {
+            if("hbasemsg".equals(y._2._10)) {
               1
             } else {
               -1
             }
-          } else {
-            x._2._8.compareTo(y._2._8)
           }
         } else {
           x._1.compareTo(y._1)
@@ -125,16 +129,27 @@ object UserDrawStatic {
       }
     }
 
-    val partitioned: RDD[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String))] = datas.repartitionAndSortWithinPartitions(new MyPartitioner(500))
 
-    val userDrawRes: RDD[UserDraw] = partitioned.mapPartitions(it => {
+    val sorted: RDD[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String))] = partitioned.filter(x => {
+      if ("".equals(x._1)) {
+        false
+      } else {
+        true
+      }
+    }).sortBy(x => x)
+
+
+
+    //sorted.take(20).foreach(x => println(x))
+
+    val res: RDD[UserDraw] = sorted.mapPartitions(it => {
       var oldmdn = ""
       //获取用户画像标签库
       val rule = ruleMapBroad.value
       val userDraws = new collection.mutable.ListBuffer[UserDraw]
       var userDraw: UserDraw = null;
       it.foreach(x => {
-        if (x._1 ne oldmdn) {
+        if (!x._1.equals(oldmdn)) {
           //新开始的一组了
           oldmdn = x._1
           if (userDraw != null) {
@@ -142,7 +157,7 @@ object UserDrawStatic {
             userDraws.append(toAddUserDraw)
           }
           userDraw = new UserDraw(x._1)
-          if (x._2._10 eq "hbasemsg") {
+          if (x._2._10.equals("hbasemsg")) {
             //hbase中有之前的用户画像
             userDraw.male = x._2._1
             userDraw.female = x._2._2
@@ -153,7 +168,8 @@ object UserDrawStatic {
             userDraw.age5 = x._2._7
           } else {
             //hbase中没有用户画像，开始画像
-            rule.get(x._2._8) match {
+            val maybeTuple: Option[(String, String, Double, Double, Double, Double, Double, Double, Double)] = rule.get(x._2._8)
+            maybeTuple match {
               case Some(a) => {
                 userDraw.protraitSex(a._3, a._4, x._2._9)
                 userDraw.protraitAge(a._5, a._6, a._7, a._8, a._9, x._2._9)
@@ -172,10 +188,11 @@ object UserDrawStatic {
           }
         }
       })
-
       userDraws.toIterator
     })
-    userDrawRes.take(10)
+
+    res.take(100).foreach(x => println(x))
+    //userDrawRes.collect()//.foreach(x => {println(x)})
     //TODO save hbase ...
     sc.stop()
 
