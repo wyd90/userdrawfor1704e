@@ -52,24 +52,4 @@ public class UserDrawReadHBaseMapReduce {
             context.write(new Text(sb.toString()), NullWritable.get());
         }
     }
-
-    public static void main(String[] args) throws IOException, ClassNotFoundException, InterruptedException {
-        Configuration conf = new Configuration();
-        conf.set("hbase.zookeeper.quorum","node4:2181");
-        Job job = Job.getInstance(conf);
-
-        job.setJobName("readhbasedemo");
-        job.setJarByClass(UserDrawReadHBaseMapReduce.class);
-        Scan scan = new Scan();
-        //初始化hbasemapper
-        TableMapReduceUtil.initTableMapperJob("ns6:t_draw",scan,UserDrawReadHBaseMapper.class,Text.class,NullWritable.class,job);
-
-        job.setNumReduceTasks(0);
-
-        FileOutputFormat.setOutputPath(job, new Path("file:///C:\\yarnData\\userDraw\\fromhbase"));
-
-        job.waitForCompletion(true);
-
-
-    }
 }

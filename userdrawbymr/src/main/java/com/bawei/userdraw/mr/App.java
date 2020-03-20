@@ -1,8 +1,10 @@
 package com.bawei.userdraw.mr;
 
+import com.bawei.userdraw.bean.StepTwoBean;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.mapreduce.TableMapReduceUtil;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.NullWritable;
@@ -32,38 +34,62 @@ public class App {
         FileOutputFormat.setOutputPath(job, new Path("file:///C:\\yarnData\\userDraw\\output"));
 
         if(job.waitForCompletion(true)) {
-            Job job2 = Job.getInstance(conf);
-            job2.setJobName("UserDrawStepTwoMapReduce");
-            job2.setJarByClass(App.class);
+            conf.set("hbase.zookeeper.quorum","node4:2181");
+            Job job1 = Job.getInstance(conf);
+            job1.setJobName("readhbasedemo");
+            job1.setJarByClass(UserDrawReadHBaseMapReduce.class);
+            Scan scan = new Scan();
+            //初始化hbasemapper
+            TableMapReduceUtil.initTableMapperJob("ns6:t_draw",scan, UserDrawReadHBaseMapReduce.UserDrawReadHBaseMapper.class,Text.class,NullWritable.class,job1);
 
-            job2.setMapperClass(UserDrawStepTwoMapReduce.UserDrawStepTwoMapper.class);
-            job2.setReducerClass(UserDrawStepTwoMapReduce.UserDrawStepTwoReducer.class);
+            job1.setNumReduceTasks(0);
 
-            job2.setOutputKeyClass(Text.class);
-            job2.setOutputValueClass(Text.class);
+            FileOutputFormat.setOutputPath(job1, new Path("file:///C:\\yarnData\\userDraw\\fromhbase"));
 
-            FileInputFormat.addInputPath(job2, new Path("file:///C:\\yarnData\\userDraw\\output"));
-            FileOutputFormat.setOutputPath(job2, new Path("file:///C:\\yarnData\\userDraw\\output2"));
+            if(job1.waitForCompletion(true)) {
+                Job job2 = Job.getInstance(conf);
+                job2.setJobName("UserDrawStepTwoMapReduce");
+                job2.setJarByClass(App.class);
 
-            if(job2.waitForCompletion(true)) {
-                conf.set("hbase.zookeeper.quorum","node4:2181");
-                Job job3 = Job.getInstance(conf);
+                job2.setMapperClass(UserDrawStepTwoMapReduce.UserDrawStepTwoMapper.class);
+                job2.setReducerClass(UserDrawStepTwoMapReduce.UserDrawStepTwoReducer.class);
 
-                job3.setJobName("UserDrawSaveHBase");
-                job3.setJarByClass(App.class);
 
-                //设置表名
-                TableMapReduceUtil.initTableReducerJob("ns6:t_draw", UserDrawSaveHBaseMapReduce.UserDrawSaveHBaseReducer.class,job3);
-                job3.setMapperClass(UserDrawSaveHBaseMapReduce.UserDrawSaveHBaseMapper.class);
+                job2.setMapOutputKeyClass(StepTwoBean.class);
+                job2.setMapOutputValueClass(NullWritable.class);
+                job2.setOutputKeyClass(Text.class);
+                job2.setOutputValueClass(NullWritable.class);
 
-                job3.setMapOutputKeyClass(Text.class);
-                job3.setMapOutputValueClass(NullWritable.class);
-                job3.setOutputKeyClass(NullWritable.class);
-                job3.setOutputValueClass(Put.class);
+                job2.setPartitionerClass(UserDrawStepTwoPartitioner.class);
+                job2.setGroupingComparatorClass(UserDrawStepTwoGroupingComparator.class);
 
-                FileInputFormat.addInputPath(job3, new Path("file:///C:\\yarnData\\userDraw\\output2"));
-                job3.waitForCompletion(true);
+                FileInputFormat.addInputPath(job2, new Path("file:///C:\\yarnData\\userDraw\\output"));
+                FileInputFormat.addInputPath(job2, new Path("file:///C:\\yarnData\\userDraw\\fromhbase"));
+                FileOutputFormat.setOutputPath(job2, new Path("file:///C:\\yarnData\\userDraw\\output2"));
+
+                if(job2.waitForCompletion(true)) {
+                    //conf.set("hbase.zookeeper.quorum","node4:2181");
+                    Job job3 = Job.getInstance(conf);
+
+                    job3.setJobName("UserDrawSaveHBase");
+                    job3.setJarByClass(App.class);
+
+                    //设置表名
+                    TableMapReduceUtil.initTableReducerJob("ns6:t_draw", UserDrawSaveHBaseMapReduce.UserDrawSaveHBaseReducer.class,job3);
+                    job3.setMapperClass(UserDrawSaveHBaseMapReduce.UserDrawSaveHBaseMapper.class);
+
+                    job3.setMapOutputKeyClass(Text.class);
+                    job3.setMapOutputValueClass(NullWritable.class);
+                    job3.setOutputKeyClass(NullWritable.class);
+                    job3.setOutputValueClass(Put.class);
+
+                    FileInputFormat.addInputPath(job3, new Path("file:///C:\\yarnData\\userDraw\\output2"));
+                    job3.waitForCompletion(true);
+                }
             }
         }
+
+
+
     }
 }
