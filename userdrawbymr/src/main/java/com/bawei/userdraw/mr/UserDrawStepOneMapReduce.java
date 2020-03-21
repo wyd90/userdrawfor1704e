@@ -1,5 +1,6 @@
 package com.bawei.userdraw.mr;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.io.Text;
@@ -25,11 +26,13 @@ public class UserDrawStepOneMapReduce {
             String[] arr = value.toString().split("[|]");
             try {
                 String mdn = arr[0];
-                Integer appId = Integer.valueOf(arr[15]);
-                Long ProcedureTime = Long.valueOf(arr[12]);
-                k.set(mdn+"|"+appId);
-                v.set(ProcedureTime);
-                context.write(k,v);
+                if(!StringUtils.isEmpty(arr[0])) {
+                    Integer appId = Integer.valueOf(arr[15]);
+                    Long ProcedureTime = Long.valueOf(arr[12]);
+                    k.set(mdn+"|"+appId);
+                    v.set(ProcedureTime);
+                    context.write(k,v);
+                }
             } catch (Exception e) {
 
             }
