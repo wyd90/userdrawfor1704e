@@ -13,6 +13,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.{Partitioner, SparkConf, SparkContext}
 
 import scala.collection.mutable
+import scala.collection.mutable.ListBuffer
 
 object UserDrawStatic {
 
@@ -59,34 +60,30 @@ object UserDrawStatic {
       }
       (mdn, ""+appId, times)
     })
+
     //过滤垃圾数据
     val filtered = maped.filter(x => {
-      if ("NULL".equals(x._1) || "0".equals(x._2) || (-1L).equals(x._3)) {
+      if (StringUtils.isEmpty(x._1) || "NULL".equals(x._1) || "0".equals(x._2) || (-1L).equals(x._3)) {
         false
       } else {
         true
       }
     })
+
+    println("用户数据条数="+filtered.count())
     //以 用户 + appId 分组，计算这个用户这个appId使用时长
     val mdnAndAppIdUseTimes: RDD[((String, String), Long)] = filtered.map(x => ((x._1,x._2),x._3)).reduceByKey(_ + _)
-
-    println(filtered.map(_._1).distinct().filter(x => {
-      if(StringUtils.isEmpty(x)) {
-        false
-      } else {
-        true
-      }
-    }).count())
 
     //把用户日志信息变成 pair元组
     val logs: RDD[(String,(Double, Double, Double, Double, Double, Double, Double, String, Long,String))] = mdnAndAppIdUseTimes.map(x => {
       //mdn     男概率，女概率，age1概率，age2概率，age3概率，age4概率，age5概率，appId，这款app使用的时长，标志位：表明这条信息是用户日志信息
       (x._1._1,(-1d, -1d, -1d, -1d, -1d, -1d, -1d, x._1._2, x._2,"logmsg"))
     })
-
+    println("求使用时长后的条数="+logs.count())
     //从hbase中把用户之前的用户画像调出来
     val hbaseConf = HBaseConfiguration.create()
-    hbaseConf.set("hbase.zookeeper.quorum","node4:2181")
+    hbaseConf.set("hbase.zookeeper.quor" +
+      "um","node4:2181")
     hbaseConf.set(TableInputFormat.INPUT_TABLE,"ns6:t_draw")
 
     val scan = new Scan
@@ -99,7 +96,7 @@ object UserDrawStatic {
       , classOf[ImmutableBytesWritable]
       , classOf[Result])
 
-    println(userDrawData.count())
+    println("hbases数据条数="+userDrawData.count())
 
     //将hbase中读取到的信息做变换
     val fromhbase: RDD[(String,(Double, Double, Double, Double, Double, Double,Double,String,Long,String))] = userDrawData.map(x => {
@@ -128,110 +125,208 @@ object UserDrawStatic {
 
     //将用户日志信息和从hbase中取出的用户画像做并
     val datas: RDD[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long,String))] = logs.union(fromhbase)
+    println("并集数据条数="+datas.count() )
 
-    val partitioned = datas.filter(x => {
-      if (!StringUtils.isEmpty(x._1)) {
-        true
-      } else {
-        false
-      }
-    }).distinct().partitionBy(new MyPartitioner(4))
+    val value1: RDD[(String, ListBuffer[(Double, Double, Double, Double, Double, Double, Double, String, Long, String)])] = datas.map(x => {
+      (x._1, ListBuffer((x._2)))
+    })
 
+    val value2: RDD[(String, ListBuffer[(Double, Double, Double, Double, Double, Double, Double, String, Long, String)])] = value1.reduceByKey((x, y) => {
+      x ++ y
+    })
 
-
-    implicit val userOrdering = new Ordering[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long,String))] {
-      override def compare(x: (String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String)), y: (String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String))): Int = {
-        //先把同mdn的数据排到一起
-        if(x._1.compareTo(y._1) == 0) {
-          //把hbase的信息排第一个
-          if(x._2._10.compareTo(y._2._10) == 0) {
-            x._2._8.compareTo(y._2._8)
-          } else {
-            if("hbasemsg".equals(y._2._10)) {
-              1
-            } else {
-              -1
-            }
-          }
+    implicit val  userDataSort = new Ordering[(Double, Double, Double, Double, Double, Double, Double, String, Long, String)] {
+      override def compare(x: (Double, Double, Double, Double, Double, Double, Double, String, Long, String), y: (Double, Double, Double, Double, Double, Double, Double, String, Long, String)): Int = {
+        if(x._10.compareTo(y._10) == 0){
+          x._8.compareTo(y._8)
         } else {
-          x._1.compareTo(y._1)
+          if("hbasemsg".equals(y._10)) {
+            1
+          } else {
+            -1
+          }
         }
       }
     }
 
-    //将分好区的数据进行排序
-    val sorted: RDD[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String))] = partitioned.sortBy(x => x)
+    val res: RDD[UserDraw] = value2.map(x => {
 
-
-
-    val res: RDD[UserDraw] = sorted.mapPartitions(it => {
-      var oldmdn = ""
-      //从广播变量获取用户画像标签库
       val rule = ruleMapBroad.value
-      //定义一个返回数据结构
-      val userDraws = new collection.mutable.ListBuffer[UserDraw]
-      //搞一个用户画像
-      var userDraw: UserDraw = null;
-      var i = 0;
-      //将分区数据一条一条迭代出来
-      it.foreach(x => {
-        if (!x._1.equals(oldmdn)) {
-          i = i + 1
-          //新开始的一组了
-          oldmdn = x._1
-          if (userDraw != null) {
-            val toAddUserDraw = new UserDraw(userDraw.mdn, userDraw.male, userDraw.female, userDraw.age1, userDraw.age2, userDraw.age3, userDraw.age4, userDraw.age5)
-            userDraws.append(toAddUserDraw)
-          }
-          userDraw = new UserDraw(x._1)
-          if (x._2._10.equals("hbasemsg")) {
-            //hbase中有之前的用户画像
-            userDraw.male = x._2._1
-            userDraw.female = x._2._2
-            userDraw.age1 = x._2._3
-            userDraw.age2 = x._2._4
-            userDraw.age3 = x._2._5
-            userDraw.age4 = x._2._6
-            userDraw.age5 = x._2._7
+      val mdn = x._1
+      val sorted = x._2.sortBy(y => y)
+      val userDraw = new UserDraw(mdn)
+
+      for (i <- 0 to sorted.length - 1) {
+
+        if (i == 0) {
+          //判断第一条数据是不是hbased的数据
+          if ("hbasemsg".equals(sorted(i)._10)) {
+            //如果是,取出
+            userDraw.male = sorted(i)._1
+            userDraw.female = sorted(i)._2
+            userDraw.age1 = sorted(i)._3
+            userDraw.age2 = sorted(i)._4
+            userDraw.age3 = sorted(i)._5
+            userDraw.age4 = sorted(i)._6
+            userDraw.age5 = sorted(i)._7
           } else {
-            //hbase中没有用户画像，开始画像
-            val maybeTuple: Option[(String, String, Double, Double, Double, Double, Double, Double, Double)] = rule.get(x._2._8)
-            maybeTuple match {
+            //如果不是，进行计算
+            val tagOp = rule.get(sorted(i)._8)
+            tagOp match {
               case Some(a) => {
-                userDraw.protraitSex(a._3, a._4, x._2._9)
-                userDraw.protraitAge(a._5, a._6, a._7, a._8, a._9, x._2._9)
+                userDraw.protraitSex(a._3, a._4, sorted(i)._9)
+                userDraw.protraitAge(a._5, a._6, a._7, a._8, a._9, sorted(i)._9)
               }
               case None =>
             }
+
           }
         } else {
-          //是同一组
-          rule.get(x._2._8) match {
+          //不是第一条数据
+          val tagOp = rule.get(sorted(i)._8)
+          tagOp match {
             case Some(a) => {
-              userDraw.protraitSex(a._3, a._4, x._2._9)
-              userDraw.protraitAge(a._5, a._6, a._7, a._8, a._9, x._2._9)
+              userDraw.protraitSex(a._3, a._4, sorted(i)._9)
+              userDraw.protraitAge(a._5, a._6, a._7, a._8, a._9, sorted(i)._9)
             }
             case None =>
           }
         }
-      })
-      if (userDraw != null) {
-        val toAddUserDraw = new UserDraw(userDraw.mdn, userDraw.male, userDraw.female, userDraw.age1, userDraw.age2, userDraw.age3, userDraw.age4, userDraw.age5)
-        userDraws.append(toAddUserDraw)
       }
-      println("thread="+ Thread.currentThread().getName  + " i="+i)
-      userDraws.toIterator
+      userDraw
     })
 
-    //res.take(100).foreach(x => println(x))
-    println(res.filter(x => {
-      if("".equals(x.mdn)) {
-        false
-      } else {
-        true
-      }
-    }).count())
-    //TODO save hbase ...
+    println("计算后的用户数="+res.count())
+
+    res.take(500).foreach(x => println(x))
+
+//    val users: Array[String] = datas.map(_._1).distinct().collect()
+//
+//    users.foreach(x => {
+//      datas.filter(y=> {
+//        if(x.equals(y._1)) {
+//          true
+//        } else {
+//          false
+//        }
+//      }).sortBy(x=>x)
+//    })
+//
+//
+//
+//    val partitioned = datas.partitionBy(new MyPartitioner(4))
+//
+//    println("分区后的条数="+partitioned.count())
+//
+//    partitioned.mapPartitionsWithIndex((x,it) => {
+//      println(s"区号${x}条数是="+it.toList.size)
+//      it
+//    }).collect()
+//
+//
+//
+//    implicit val userOrdering = new Ordering[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long,String))] {
+//      override def compare(x: (String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String)), y: (String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String))): Int = {
+//        //先把同mdn的数据排到一起
+//        if(x._1.compareTo(y._1) == 0) {
+//          //把hbase的信息排第一个
+//          if(x._2._10.compareTo(y._2._10) == 0) {
+//            x._2._8.compareTo(y._2._8)
+//          } else {
+//            if("hbasemsg".equals(y._2._10)) {
+//              1
+//            } else {
+//              -1
+//            }
+//          }
+//        } else {
+//          x._1.compareTo(y._1)
+//        }
+//      }
+//    }
+////
+////    //将分好区的数据进行排序
+//    val sorted: RDD[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String))] = partitioned.sortBy(x => x)
+//
+//    println("排好序后条数是="+sorted.count())
+//
+//    sorted.mapPartitionsWithIndex((x,it) => {
+//      println(s"排序后，区号${x}条数是="+it.toList.size)
+//      it
+//    }).collect()
+//
+//    println("排序后的总用户数="+sorted.map(_._1).distinct().count())
+//
+//    sorted.map(_._1).distinct().mapPartitionsWithIndex((x,it) => {
+//      println(s"排序后，区号${x}用户条数是="+it.toList.size)
+//      it
+//    }).collect()
+//
+//
+//
+//
+//
+////
+////
+//    sorted.mapPartitions(it => {
+//      val resList: ListBuffer[UserDraw] = new collection.mutable.ListBuffer[UserDraw]
+//
+//      val distinct = it.toList.map(_._1).distinct
+//
+//      //val userMap: Map[String, List[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long, String))]] = it.toList.groupBy(_._1)
+////      val rule = ruleMapBroad.value
+////
+////
+////      for((k,v) <- userMap) {
+////        val userDraw = new UserDraw(k)
+////        for(i <- 0 to v.length - 1) {
+////
+////          if(i == 0) {
+////            //判断第一条数据是不是hbased的数据
+////            if("hbasemsg".equals(v(i)._2._10)) {
+////              //如果是,取出
+////              userDraw.male = v(i)._2._1
+////              userDraw.female = v(i)._2._2
+////              userDraw.age1 = v(i)._2._3
+////              userDraw.age2 = v(i)._2._4
+////              userDraw.age3 = v(i)._2._5
+////              userDraw.age4 = v(i)._2._6
+////              userDraw.age5 = v(i)._2._7
+////            } else {
+////              //如果不是，进行计算
+////              val tagOp = rule.get(v(i)._2._8)
+////              tagOp match{
+////                case Some(a) => {
+////                  userDraw.protraitSex(a._3,a._4,v(i)._2._9)
+////                  userDraw.protraitAge(a._5,a._6,a._7,a._8,a._9,v(i)._2._9)
+////                }
+////                case None =>
+////              }
+////
+////            }
+////          } else {
+////            //不是第一条数据
+////            val tagOp = rule.get(v(i)._2._8)
+////            tagOp match{
+////              case Some(a) => {
+////                userDraw.protraitSex(a._3,a._4,v(i)._2._9)
+////                userDraw.protraitAge(a._5,a._6,a._7,a._8,a._9,v(i)._2._9)
+////              }
+////              case None =>
+////            }
+////          }
+////        }
+////        resList.append(userDraw)
+////      }
+//
+//
+//      println(s"计算后，区号${x}用户条数是="+distinct.size)
+//      resList.toIterator
+//    },true).collect()
+//
+//    //res.take(100).foreach(x => println(x))
+//    //println(res.map(x => x.mdn).distinct().count())
+//    //TODO save hbase ...
     sc.stop()
 
   }
