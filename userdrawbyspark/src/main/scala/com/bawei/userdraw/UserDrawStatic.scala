@@ -1,13 +1,15 @@
 package com.bawei.userdraw
 
 import org.apache.commons.lang.StringUtils
-import org.apache.hadoop.hbase.HBaseConfiguration
-import org.apache.hadoop.hbase.client.{Result, Scan}
+import org.apache.hadoop.hbase.{HBaseConfiguration, HConstants}
+import org.apache.hadoop.hbase.client.{Put, Result, Scan}
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable
+import org.apache.hadoop.hbase.mapred.TableOutputFormat
 import org.apache.hadoop.hbase.mapreduce.TableInputFormat
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos
 import org.apache.hadoop.hbase.util.{Base64, Bytes}
+import org.apache.hadoop.mapred.JobConf
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{Partitioner, SparkConf, SparkContext}
@@ -70,7 +72,7 @@ object UserDrawStatic {
       }
     })
 
-    println("用户数据条数="+filtered.count())
+    println("用户数据数="+filtered.map(x => x._1).distinct().count())
     //以 用户 + appId 分组，计算这个用户这个appId使用时长
     val mdnAndAppIdUseTimes: RDD[((String, String), Long)] = filtered.map(x => ((x._1,x._2),x._3)).reduceByKey(_ + _)
 
@@ -79,7 +81,6 @@ object UserDrawStatic {
       //mdn     男概率，女概率，age1概率，age2概率，age3概率，age4概率，age5概率，appId，这款app使用的时长，标志位：表明这条信息是用户日志信息
       (x._1._1,(-1d, -1d, -1d, -1d, -1d, -1d, -1d, x._1._2, x._2,"logmsg"))
     })
-    println("求使用时长后的条数="+logs.count())
     //从hbase中把用户之前的用户画像调出来
     val hbaseConf = HBaseConfiguration.create()
     hbaseConf.set("hbase.zookeeper.quor" +
@@ -125,7 +126,6 @@ object UserDrawStatic {
 
     //将用户日志信息和从hbase中取出的用户画像做并
     val datas: RDD[(String, (Double, Double, Double, Double, Double, Double, Double, String, Long,String))] = logs.union(fromhbase)
-    println("并集数据条数="+datas.count() )
 
     val value1: RDD[(String, ListBuffer[(Double, Double, Double, Double, Double, Double, Double, String, Long, String)])] = datas.map(x => {
       (x._1, ListBuffer((x._2)))
@@ -196,9 +196,31 @@ object UserDrawStatic {
       userDraw
     })
 
-    println("计算后的用户数="+res.count())
+    val hbaseConfOut = HBaseConfiguration.create()
+    hbaseConfOut.set(HConstants.ZOOKEEPER_QUORUM,"node4:2181")
+    val jobConf = new JobConf(hbaseConfOut)
+    jobConf.setOutputFormat(classOf[TableOutputFormat])
+    jobConf.set(TableOutputFormat.OUTPUT_TABLE,"ns6:t_draw")
 
-    res.take(500).foreach(x => println(x))
+
+    val dataToHbase = res.map(userDraw => {
+      val mdn = userDraw.mdn
+      val put = new Put(Bytes.toBytes(mdn))
+      put.addColumn(Bytes.toBytes("f1"), Bytes.toBytes("male"), Bytes.toBytes(userDraw.male))
+      put.addColumn(Bytes.toBytes("f1"), Bytes.toBytes("female"), Bytes.toBytes(userDraw.female))
+      put.addColumn(Bytes.toBytes("f1"), Bytes.toBytes("age1"), Bytes.toBytes(userDraw.age1))
+      put.addColumn(Bytes.toBytes("f1"), Bytes.toBytes("age2"), Bytes.toBytes(userDraw.age2))
+      put.addColumn(Bytes.toBytes("f1"), Bytes.toBytes("age3"), Bytes.toBytes(userDraw.age3))
+      put.addColumn(Bytes.toBytes("f1"), Bytes.toBytes("age4"), Bytes.toBytes(userDraw.age4))
+      put.addColumn(Bytes.toBytes("f1"), Bytes.toBytes("age5"), Bytes.toBytes(userDraw.age5))
+
+      (new ImmutableBytesWritable, put)
+    })
+    dataToHbase.saveAsHadoopDataset(jobConf)
+
+    sc.stop()
+
+    //res.take(500).foreach(x => println(x))
 
 //    val users: Array[String] = datas.map(_._1).distinct().collect()
 //
@@ -326,8 +348,7 @@ object UserDrawStatic {
 //
 //    //res.take(100).foreach(x => println(x))
 //    //println(res.map(x => x.mdn).distinct().count())
-//    //TODO save hbase ...
-    sc.stop()
+
 
   }
 
