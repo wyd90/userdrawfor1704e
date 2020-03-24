@@ -1,6 +1,8 @@
 package com.bawei.ordercaulate
 
-import com.bawei.util.{JedisConnectionPool, JudgeIp}
+import java.text.DecimalFormat
+import java.util.Calendar
+
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.spark.SparkConf
@@ -29,7 +31,9 @@ import org.apache.spark.streaming.{Duration, Milliseconds, Seconds, StreamingCon
 object OrderCaulate {
   def main(args: Array[String]): Unit = {
     val conf = new SparkConf().setMaster("local[*]").setAppName("ordercaulate")
-    val ssc = new StreamingContext(conf, Seconds(5))
+    val ssc = new StreamingContext(conf, Seconds(60))
+
+    ssc.checkpoint("hdfs://node4:8020/sparkcheckpoints")
 
     val ipText = ssc.sparkContext.textFile("C:\\yarnData\\ip\\rule")
     val ruleRdd: RDD[(Long, Long, String)] = ipText.map(line => {
@@ -67,6 +71,20 @@ object OrderCaulate {
           //实时etl，做数据清洗
           val orders: RDD[(String, Long, String, String, Double, Float, Double)] = CaulateUtil.realTimeEtl(lines)
 
+          //实时存入hdfs，供离线计算使用
+
+          val df = new DecimalFormat("00")
+
+          val c = Calendar.getInstance()
+          val year = c.get(Calendar.YEAR)
+          val month = df.format((c.get(Calendar.MONTH) + 1))
+
+          val day = df.format(c.get(Calendar.DAY_OF_MONTH))
+          val hour = df.format(c.get(Calendar.HOUR_OF_DAY))
+          orders
+              .coalesce(1)   //减少输出到hdfs中的文件数量
+              .saveAsTextFile("hdfs://node4:8020/ordercaulate/"+year+"/"+month + "/"+day+"/"+hour+"/"+c.getTimeInMillis)
+
           //计算业务指标
           if(!orders.isEmpty()) {
             //计算实时交易总金额
@@ -74,6 +92,7 @@ object OrderCaulate {
             //按地区计算交易额
             CaulateUtil.caulateByProvince(orders,rulesRef)
             //按商品类别统计
+            CaulateUtil.caulateByItem(orders)
           }
 
           //---------------------------

@@ -70,4 +70,15 @@ object CaulateUtil {
     })
   }
 
+  def caulateByItem(orders:  RDD[(String, Long, String, String, Double, Float, Double)]) = {
+    val reduced: RDD[(String, Double)] = orders.map(x => (x._3,x._7)).reduceByKey(_+_)
+    reduced.mapPartitions(it => {
+      val conn = JedisConnectionPool.getConnection
+      it.foreach(x => {
+        conn.incrByFloat(x._1,x._2)
+      })
+      conn.close()
+      it
+    })
+  }
 }
