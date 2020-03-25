@@ -1,10 +1,32 @@
 package com.bawei.ordercaulate
 
 import com.bawei.util.{JedisConnectionPool, JudgeIp}
+import org.apache.spark.SparkContext
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 
 object CaulateUtil {
+
+  @volatile private var instance: Broadcast[Array[(Long, Long, String)]] = null
+  def getInstance(sc: SparkContext): Broadcast[Array[(Long, Long, String)]] = {
+    if (instance == null) {
+      synchronized {
+        if (instance == null) {
+        val ipText = sc.textFile("hdfs://node4:8020/ip/rule/ip.txt")
+        val ruleRdd: RDD[(Long, Long, String)] = ipText.map(line => {
+          val arr = line.split("[|]")
+          (arr(2).toLong, arr(3).toLong, arr(6))
+        })
+
+        val rules: Array[(Long, Long, String)] = ruleRdd.collect()
+
+
+          instance = sc.broadcast(rules)
+        }
+      }
+    }
+    instance
+  }
 
   //清洗数据
   def realTimeEtl(lines: RDD[String]) = {
@@ -53,8 +75,8 @@ object CaulateUtil {
     conn.close()
   }
 
-  def caulateByProvince(orders: RDD[(String, Long, String, String, Double, Float, Double)],rulesRef: Broadcast[Array[(Long, Long, String)]]) = {
-    val ipRules = rulesRef.value
+  def caulateByProvince(orders: RDD[(String, Long, String, String, Double, Float, Double)],sc: SparkContext) = {
+    val ipRules = getInstance(orders.sparkContext).value
     val provinceAndMoney = orders.map(x => {
       val province = IpUtil.searchIp(ipRules, x._2)
       (province, x._7)

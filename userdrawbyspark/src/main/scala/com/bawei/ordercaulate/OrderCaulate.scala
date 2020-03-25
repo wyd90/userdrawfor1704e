@@ -36,18 +36,7 @@ object OrderCaulate {
   var checkpointDirectory = ""
   var param: Array[String] = null
 
-  @volatile private var instance: Broadcast[Array[(Long, Long, String)]] = null
 
-  def getInstance(sc: SparkContext,rules: Array[(Long, Long, String)]): Broadcast[Array[(Long, Long, String)]] = {
-    if (instance == null) {
-      synchronized {
-        if (instance == null) {
-          instance = sc.broadcast(rules)
-        }
-      }
-    }
-    instance
-  }
 
 
   def functionToCreateContext(): StreamingContext = {
@@ -55,19 +44,9 @@ object OrderCaulate {
     //conf.set("spark.streaming.blockInterval","100ms")
     conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
       .registerKryoClasses(Array(classOf[Array[(Long, Long, String)]],classOf[String]))
-    val ssc = new StreamingContext(conf, Seconds(10))
+    val ssc = new StreamingContext(conf, Seconds(20))
 
     ssc.checkpoint(checkpointDirectory)
-
-    val ipText = ssc.sparkContext.textFile("hdfs://node4:8020/ip/rule/ip.txt")
-    val ruleRdd: RDD[(Long, Long, String)] = ipText.map(line => {
-      val arr = line.split("[|]")
-      (arr(2).toLong, arr(3).toLong, arr(6))
-    })
-
-    val rules: Array[(Long, Long, String)] = ruleRdd.collect()
-
-    val rulesRef: Broadcast[Array[(Long, Long, String)]] = getInstance(ssc.sparkContext,rules)
 
     val Array(brokers, groupId, topics) = param
     val topicsSet = topics.split(",").toSet
@@ -114,7 +93,7 @@ object OrderCaulate {
           //计算实时交易总金额
           CaulateUtil.caulateOrderSum(orders)
           //按地区计算交易额
-          CaulateUtil.caulateByProvince(orders,rulesRef)
+          CaulateUtil.caulateByProvince(orders,null)
           //按商品类别统计
           CaulateUtil.caulateByItem(orders)
         }
