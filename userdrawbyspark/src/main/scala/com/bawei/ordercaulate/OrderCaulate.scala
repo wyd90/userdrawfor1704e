@@ -1,8 +1,11 @@
 package com.bawei.ordercaulate
 
+import java.net.URI
 import java.text.DecimalFormat
 import java.util.Calendar
 
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.spark.{SparkConf, SparkContext}
@@ -49,7 +52,7 @@ object OrderCaulate {
 
   def functionToCreateContext(): StreamingContext = {
     val conf = new SparkConf().setAppName("ordercaulate")
-    val ssc = new StreamingContext(conf, Seconds(60))
+    val ssc = new StreamingContext(conf, Seconds(10))
 
     ssc.checkpoint(checkpointDirectory)
 
@@ -129,6 +132,34 @@ object OrderCaulate {
     val context = StreamingContext.getOrCreate(checkpointDirectory,functionToCreateContext _)
 
     context.start()
-    context.awaitTermination()
+    val checkIntervalMillis = 10000
+    var isStopped = false
+
+
+    while (! isStopped) {
+      println("calling awaitTerminationOrTimeout")
+      isStopped = context.awaitTerminationOrTimeout(checkIntervalMillis)
+      if (isStopped)
+        println("confirmed! The streaming context is stopped. Exiting application...")
+      else
+        println("Streaming App is still running. Timeout...")
+      checkShutdownMarker
+      if (!isStopped && stopFlag) {
+        println("stopping ssc right now")
+        context.stop(true, true)
+        println("ssc is stopped!!!!!!!")
+      }
+    }
+  }
+
+  var stopFlag:Boolean = false
+  val shutdownMarker = "hdfs://node4:8020/sparkstreamingstopmark/shutdownmarker"
+
+  def checkShutdownMarker = {
+    if (!stopFlag) {
+      val fs = FileSystem.get(URI.create("hdfs://node4:8020"),new Configuration())
+      stopFlag = fs.exists(new Path(shutdownMarker))
+    }
+
   }
 }

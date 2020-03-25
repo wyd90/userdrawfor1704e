@@ -11,7 +11,7 @@
     <properties>
         <maven.compiler.source>1.8</maven.compiler.source>
         <maven.compiler.target>1.8</maven.compiler.target>
-        <scala.version>2.11.8</scala.version>
+        <scala.version>2.11.12</scala.version>
         <spark.version>2.4.5</spark.version>
         <hadoop.version>2.7.3</hadoop.version>
         <encoding>UTF-8</encoding>
@@ -45,6 +45,7 @@
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-hive_2.11</artifactId>
             <version>${spark.version}</version>
+            <scope>provided</scope>
         </dependency>
 
         <dependency>
