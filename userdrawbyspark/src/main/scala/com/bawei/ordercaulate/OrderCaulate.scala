@@ -52,6 +52,9 @@ object OrderCaulate {
 
   def functionToCreateContext(): StreamingContext = {
     val conf = new SparkConf().setAppName("ordercaulate")
+    //conf.set("spark.streaming.blockInterval","100ms")
+    conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+      .registerKryoClasses(Array(classOf[Array[(Long, Long, String)]],classOf[String]))
     val ssc = new StreamingContext(conf, Seconds(10))
 
     ssc.checkpoint(checkpointDirectory)

@@ -1,0 +1,211 @@
+新sparkstreaming调优
+
+从多个kafka topic中接收数据，可以用多个Reciver接收，然后合并在一起进行处理
+package com.bawei.sparksteaming.tuning
+
+import org.apache.kafka.clients.consumer.ConsumerRecord
+import org.apache.kafka.common.serialization.StringDeserializer
+import org.apache.spark.SparkConf
+import org.apache.spark.streaming.dstream.{DStream, InputDStream}
+import org.apache.spark.streaming.kafka010.{ConsumerStrategies, KafkaUtils, LocationStrategies}
+import org.apache.spark.streaming.{Seconds, StreamingContext}
+import scala.collection.immutable
+object MultipleReceiveFromKafka {
+
+  def main(args: Array[String]): Unit = {
+    val conf = new SparkConf().setMaster("local[*]").setAppName("MultipleReceiveFromKafka")
+    val ssc = new StreamingContext(conf, Seconds(30))
+    val kafkaParams = Map[String, Object](
+      "bootstrap.servers" -> "node4:9092",
+      "key.deserializer" -> classOf[StringDeserializer],
+      "value.deserializer" -> classOf[StringDeserializer],
+      "group.id" -> "use_a_separate_group_id_for_each_stream",
+      "auto.offset.reset" -> "earliest", //latest
+      "enable.auto.commit" -> (false: java.lang.Boolean)
+    )
+    val topics = Array("topic1","topic2","topic3","topic4","topic5")
+    val numStreams = 5
+
+    val kafkaStreams: immutable.IndexedSeq[InputDStream[ConsumerRecord[String, String]]] = (1 to numStreams).map(i => KafkaUtils.createDirectStream[String, String](
+      ssc,
+      LocationStrategies.PreferConsistent,
+      ConsumerStrategies.Subscribe[String, String](Array(topics(i-1)), kafkaParams)
+    ))
+    val singleDStream: DStream[ConsumerRecord[String, String]] = ssc.union(kafkaStreams)
+    singleDStream.foreachRDD(kafkaRDD => {
+    })
+    ssc.start()
+    ssc.stop()
+  }
+}
+
+===============================================
+应考虑的另一个参数是 receiver’s block interval（接收器的块间隔），这由configuration parameter（配置参数） 的 spark.streaming.blockInterval 决定。对于大多数 receivers（接收器），接收到的数据 coalesced（合并）在一起存储在 Spark 内存之前的 blocks of data（数据块）
+
+每个 receiver（接收器）每 batch（批次）的任务数量将是大约（batch interval（批间隔）/ block interval（块间隔））
+
+例如，200 ms的 block interval（块间隔）每 2 秒 batches（批次）创建 10 个 tasks（任务）
+如果你集群里有40个cpu核，那么10个任务只能用10个核，还有30个核空闲着，所以，要增大批次间隔或调小block interval
+这时，我把block interval调整到100ms，再把批次间隔调整到4秒，这样正好等于40核，但是要有个富余量，可以把批次间隔调整为3.5秒
+
+推荐的 block interval（块间隔）最小值约为 50ms，低于此任务启动开销可能是一个问题。
+
+=================================================
+conf
+spark.default.parallelism  建议设置为集群中cpu总核数
+
+===============================================
+
+使用kryo替换spark的默认序列化器
+
+//spark需要序列化的地方
+1、receiver接收器
+2、persist持久化
+3、reduceBy。。。。时
+4、广播变量时
+
+conf
+.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer") //设置kryo为序列化器
+      .registerKryoClasses(Array(classOf[String],classOf[Array[(Long, Long, String)]],classOf[Student]))  //设置要序列化的类
+
+============================================================
+
+数据批次Job执行的时间不要大于batchsize的时间
+
+=============================================================
+
+调节堆内存 transmission和persist内存使用占比
+spark中，堆内存又被划分成了两块儿，一块儿是专门用来给RDD的cache、persist操作进行RDD数据缓存用的；另外一块儿，就是我们刚才所说的，用来给spark算子函数的运行使用的，存放函数中自己创建的对象。默认情况下，给RDD cache操作的内存占比是0.6，即60%的内存都给了cache操作了。但是问题是，如果某些情况下cache占用的内存并不需要占用那么大，这个时候可以将其内存占比适当降低。怎么判断在什么时候调整RDD cache的内存占用比呢？其实通过Spark监控平台就可以看到Spark作业的运行情况了，如果发现task频繁的gc，就可以去调整cache的内存占用比了。通过SparkConf.set("spark.storage.memoryFraction","0.6")来设定。
+
+//如果你程序中不用cache或者cache的数据很小，就可以减小这个占比
+SparkConf.set("spark.storage.memoryFraction","0.6")
+
+--------------------------------------------------------
+
+调节堆内存 shuffle和persist的内存使用占比
+spark.shuffle.memoryFraction
+参数说明：该参数用于设置shuffle过程中一个task拉取到上个stage的task的输出后，进行聚合操作时能够使用的Executor内存的比例，默认是0.2。也就是说，Executor默认只有20%的内存用来进行该操作。shuffle操作在进行聚合时，如果发现使用的内存超出了这个20%的限制，那么多余的数据就会溢写到磁盘文件中去，此时就会极大地降低性能。
+参数调优建议：如果Spark作业中的RDD持久化操作较少，shuffle操作较多时，建议降低持久化操作的内存占比，提高shuffle操作的内存占比比例，避免shuffle过程中数据过多时内存不够用，必须溢写到磁盘上，降低了性能。此外，如果发现作业由于频繁的gc导致运行缓慢，意味着task执行用户代码的内存不够用，那么同样建议调低这个参数的值。
+
+====================================================================
+
+executor在yarn上运行时要调优的参数
+
+--conf  spark.yarn.executor.memoryOverhead=2048
+
+        在spark-submit脚本里面添加如上配置。默认情况下，这个堆外内存上限大概是384多M；我们通常项目中真正处理大数据的时候，这里都会出现问题导致spark作业反复崩溃无法运行；此时就会去调节这个参数，到至少1G或者更大的内存。通常这个参数调节上去以后，就会避免掉某些OOM的异常问题，同时呢，会让整体spark作业的性能，得到较大的提升。
+
+executor执行的时候，用的内存可能会超过executor-memoy，所以会为executor额外预留一部分内存。spark.yarn.executor.memoryOverhead代表了这部分内存
+
+
+
+yarn.scheduler.maximum-allocation-mb
+这个参数表示每个container能够申请到的最大内存，一般是集群统一配置。Spark中的executor进程是跑在container中，所以container的最大内存会直接影响到executor的最大可用内存。当你设置一个比较大的内存时，日志中会报错
+
+
+spark-submit --conf spark.yarn.executor.memoryOverhead=2048
+
+
+===================================================================
+
+调节堆外内存
+
+为了进一步优化内存的使用以及提高 Shuffle 时排序的效率，Spark 引入了堆外（Off-heap）内存，使之可以直接在工作节点的系统内存中开辟空间，存储经过序列化的二进制数据。利用 JDK Unsafe API（从 Spark 2.0 开始，在管理堆外的存储内存时不再基于 Tachyon，而是与堆外的执行内存一样，基于 JDK Unsafe API 实现[3]），Spark 可以直接操作系统堆外内存，减少了不必要的内存开销，以及频繁的 GC 扫描和回收，提升了处理性能。堆外内存可以被精确地申请和释放，而且序列化的数据占用的空间可以被精确计算，所以相比堆内内存来说降低了管理的难度，也降低了误差。
+
+在默认情况下堆外内存并不启用，可通过配置 spark.memory.offHeap.enabled 参数启用，并由 spark.memory.offHeap.size 参数设定堆外空间的大小。除了没有 other 空间，堆外内存与堆内内存的划分方式相同，所有运行中的并发任务共享存储内存和执行内存。
+
+======================================================================
+
+连接等待时长的调整
+由于JVM内存过小，导致频繁的Minor gc，有时候更会触犯full gc，一旦出发full gc；此时所有程序暂停，导致无法建立网络连接；spark默认的网络连接的超时时长是60s；如果卡住60s都无法建立连接的话，那么就宣告失败了。
+
+
+bin/spark-submit \
+--conf spark.core.connection.ack.wait.timeout=300 \
+--conf spark.yarn.executor.memoryOverhead=2048 \
+
+==========================================================================
+
+spark Java GC的高级调整
+
+----------------------------------
+
+监测垃圾回收
+我们可以对垃圾回收进行监测，包括多久进行一次垃圾回收，以及每次垃圾回收耗费的时间。只要在spark-submit脚本中，增加一个配置即可，
+--conf "spark.executor.extraJavaOptions=-verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps" 
+
+----------------------------------------
+如果发现，在task执行期间，大量full gc发生了，那么说明，年轻代的Eden区域，给的空间不够大。此时可以执行一些操作来优化垃圾回收行为：
+1、包括降低spark.storage.memoryFraction的比例，给年轻代更多的空间，来存放短时间存活的对象；
+2、给Eden区域分配更大的空间，使用-Xmn即可，通常建议给Eden区域，预计大小的4/3；
+3、如果使用的是HDFS文件，那么很好估计Eden区域大小，如果每个executor有4个task，然后每个hdfs压缩块解压缩后大小是3倍，此外每个hdfs块的大小是64M，那么Eden区域的预计大小就是：4 * 3 * 64MB，然后呢，再通过-Xmn参数，将Eden区域大小设置为4 * 3 * 64 * 4/3。
+
+一些高级的参数
+-XX:SurvivorRatio=4：如果值为4，那么就是两个Survivor跟Eden的比例是2:4，也就是说每个Survivor占据的年轻代的比例是1/6，所以，你其实也可以尝试调大Survivor区域的大小。
+-XX:NewRatio=4：调节新生代和老年代的比例, 表示年轻代与年老代所占比值为1:4,年轻代占整个堆栈的1/5
+Xms=Xmx 并且设置了Xmn的情况下，该参数不需要进行设置。
+
+最后一点总结
+对于垃圾回收的调优，尽量就是说，调节executor内存的比例就可以了。因为jvm的调优是非常复杂和敏感的。真的到了万不得已的地方，并且对jvm相关的技术很了解，那么再进行eden区域的调节，调优。
+
+-------------------------------------------
+
+更换垃圾回收器
+
+如果分配给单个Executor的Heap足够大(我认为超过32G)时使用G1  -XX:+UseG1GC -XX:NewRatio=8
+如果内存不够32G，使用Parallel  -XX:+UseParallelGC -XX:+UseParallelOldGC
+
+使用G1可能也可能引起Executor异常退出，这时有两种解决方法：
+1.1. 减少cores数量(就是减少当前Executor并行task的数量)
+1.2. 增加老年代内存
+
+-----------------------------------------------
+bin/spark-submit --class org.apache.spark.examples.SparkPi  --master yarn --deploy-mode cluster --driver-memory 1g --executor-memory 1g --executor-cores 2 --queue default examples/jars/spark-examples_2.11-2.4.0.jar 10000
+提交实例
+bin/spark-submit \
+--master yarn \
+--deploy-mode cluster \
+--executor-memory 36g \
+--executor-cores 2 \
+--num-executors 10 \  #设置大小受限于集群中节点数量？集群5个节点，申请10个executors，结果只返回4个executors
+--queue default \
+--driver-memory 2g \
+--conf "spark.executor.extraJavaOptions=-XX:+UseG1GC -XX:NewRatio=8"
+--conf spark.core.connection.ack.wait.timeout=300
+--conf spark.yarn.executor.memoryOverhead=10240
+--conf spark.storage.memoryFraction=0.5
+--conf spark.shuffle.memoryFraction=0.5
+--conf spark.default.parallelism=20 #executor-cores * num-executors
+--conf "spark.executorEnv.JAVA_HOME=/usr/java/jdk1.8.0_131" \
+--conf "spark.yarn.appMasterEnv.JAVA_HOME=/usr/java/jdk1.8.0_131"
+
+
+1.选择垃圾回收器
+
+如果分配给单个Executor的Heap足够大(我认为超过32G)时使用G1，否则使用Parallel。因为如果在Heap小于32G时使用G1，G1 region size默认小于16M，可能引发Humongous对象分配问题。
+
+当然，使用G1可能也可能引起Executor异常退出，这时有两种解决方法：
+
+1.1. 减少cores数量(就是减少当前Executor并行task的数量)
+
+1.2. 增加老年代内存
+
+
+
+2.测试验证GC参数
+
+硬件环境：(64G+8cores+42T) * 4，用yarn管理，利用Spark SQL对124G,169个字段的数据用row_number函数除重，除重前1.6亿条，除重后1.5亿条：
+
+
+
+executor-memory	executor-cores	extraJavaOptions	Max GC Time	Job Duration
+20g	10	-XX:+UseG1GC	60s	32min
+30g	20	-XX:+UseG1GC	2.0 min	27min
+36g	20	-XX:+UseG1GC	1.8 min	26min
+36g	20	-XX:+UseG1GC -XX:NewRatio=8	11 s	23min
+36g	22	-XX:+UseG1GC -XX:NewRatio=8	17 s	25min
+36g	28	-XX:+UseG1GC -XX:NewRatio=8 -XXConcGCThreads=20	28 s	22min
+20g	20	-XX:+UseParallelGC -XX:+UseParallelOldGC	50s	25min
+36g	20	-XX:+UseParallelGC -XX:+UseParallelOldGC	17s	25min
+20g	20	-XX:+UseConcMarkSweepGC -XX:+UseParNewGC	1.9min	42min
+36g	20	-XX:+UseConcMarkSweepGC -XX:+UseParNewGC	1.7min	34min

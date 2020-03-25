@@ -1,0 +1,3173 @@
+standalone spark自带的调度框架
+--------------------------------------------------------------
+Spark安装
+	tar -zxvf spark-2.4.0-bin-hadoop2.7.tgz -C /usr/local/
+	cd /usr/local/spark-2.4.0-bin-hadoop2.7/conf
+	cp spark-env.sh.template spark-env.sh
+	cp slaves.template slaves
+
+	vi spark-env.sh 在最后添加export信息
+	export JAVA_HOME=/usr/local/jdk1.8.0_192  //导出java环境变量
+	export SPARK_MASTER_HOST=node1    //配置master地址
+	export SPARK_MASTER_PORT=7077     //配置master端口
+
+	vi slaves
+	node1
+	node2
+	node3
+	noed4
+	node5
+	配置从节点
+	分发配置文件
+	for i in {2..5}; do scp spark-env.sh node$i:$PWD; done
+	for i in {2..5}; do scp slaves node$i:$PWD; done
+--------------------------------------------------------------
+启动Spark
+	sbin/start-all.sh
+	网页访问 http://node1:8080/
+停止Spark
+	sbin/stop-all.sh
+	sbin目录不建议配置到环境变量中
+--------------------------------------------------------------
+Spark配置高可用
+	Spark的Worker推荐的Cores应该为Worker所在机器cpu的线程数
+	vi conf/spark.env
+	将export SPARK_MASTER_HOST=node1
+	export SPARK_MASTER_PORT=7077注掉
+	添加
+	export SPARK_DAEMON_JAVA_OPTS="-Dspark.deploy.recoveryMode=ZOOKEEPER -Dspark.deploy.zookeeper.url=node3,node4,node5 -Dspark.deploy.zookeeper.dir=/spark2"
+	export SPARK_WORKER_CORES=1     //配置worder的可用核数
+	export SPARK_WORKER_MEMORY=1g   //配置worker的内存
+---------------------------------------------------------------
+提交Spark官方示例到集群
+bin/spark-submit --master spark://node1:7077,node2:7077 --class org.apache.spark.examples.SparkPi examples/jars/spark-examples_2.11-2.4.0.jar 100
+求Pi，100次迭代
+
+分配启动多少个Executor,每个worker用多少内存
+bin/spark-submit --master spark://node1:7077,node2:7077 --class org.apache.spark.examples.SparkPi --executor-memory 1024mb --total-executor-cores 3  examples/jars/spark-examples_2.11-2.4.0.jar 10000
+
+SparkSubmit(Driver)提交任务
+Executor 执行真正的计算任务的
+
+----------------------------------------------------------------
+Spark Shell
+spark shell是一个交互式的命令行，里面可以写spark程序，方便学习和测试,它也是一个客户端，用于提交spark应用程序
+启动Spark Shell
+bin/spark-shell   //本地模式启动shell
+bin/spark-shell --master spark://node1:7077,node2:7077  
+//提交任务到集群中，开始时sparksubmit（客户端）要连接Master，并申请计算资源（内存和核数），Master进行资源调度（就是让哪些Worker启动Exeutor），在准备工作时，这些进程都已经创建好了
+-----------------------------------------------------------------
+Spark读取hdfs上数据
+整合高可用的HDFS，要把hdfs的core-site.xml和hdfs-site.xml两个文件拷贝到spark的conf目录下
+Spark Shell执行wordcount
+sc.textFile("hdfs://hdp12/wc").flatMap(_.split(" ")).map((_,1)).reduceByKey(_+_).sortBy(_._2,false).collect
+-----------------------------------------------------------------
+将Driver端的一个集合通过并行化变成RDD，两种方式
+val arr = Array(1,2,3,4,5,6,7,8,9,10)
+val rdd1 = sc.parallelize(arr)
+val rdd1 = sc.makeRDD(List(1,3,9,1,5,7,6))
+-----------------------------------------------------------------
+RDD上的算法
+union方法，求并集
+val rdd6 = sc.parallelize(List(5,6,4,7))
+val rdd7 = sc.parallelize(List(1,2,3,4))
+
+val rdd8 = rdd6.union(rdd7) //求并集
+得Array[Int] = Array(5, 6, 4, 7, 1, 2, 3, 4)
+
+-------------------------
+
+intersection 方法，求交集
+rdd9 = rdd6.intersection(rdd7)
+得Array[Int] = Array(4)
+
+-------------------------
+join（连接）方法,join只能按照key等值join
+val rdd1 = sc.parallelize(List(("tom", 1),("jerry", 2),("kitty",3)))
+val rdd2 = sc.parallelize(List(("jerry",9),("tom", 8),("shuke", 7),("tom", 2)))
+rdd1.join(rdd2)
+得Array((tom,(1,2)), (tom,(1,8)), (jerry,(2,9)))
+-------
+leftOuterJoin 左外连接，左表的数据一定显示，右表的数据有就显示，没有就不显示
+rdd1.leftOuterJoin(rdd2)
+得Array((kitty,(3,None)), (tom,(1,Some(8))), (tom,(1,Some(2))), (jerry,(2,Some(9))))
+-------
+rightOuterJoin 右外连接，右表的数据一定显示，左表的数据有就显示，没有就不显示
+rdd1.rightOuterJoin(rdd2)
+得Array((tom,(Some(1),2)), (tom,(Some(1),8)), (jerry,(Some(2),9)), (shuke,(None,7)))
+-------
+cogroup 斜分组
+rdd1.cogroup(rdd2)
+得Array((kitty,(CompactBuffer(3),CompactBuffer())), (tom,(CompactBuffer(1),CompactBuffer(8, 2))), (jerry,(CompactBuffer(2),CompactBuffer(9))), (shuke,(CompactBuffer(),CompactBuffer(7))))
+
+--------------------------
+
+rdd2.join(rdd1)
+得Array((tom,(2,1)), (tom,(8,1)), (jerry,(9,2)))
+
+----------------------------------------------------------------------------
+
+wordcount的几种方式
+r1.flatMap(_.split(" ")).map((_, 1)).groupByKey().mapValues(_.sum).collect
+r1.flatMap(_.split(" ")).map((_, 1)).reduceByKey(_+_).collect
+推荐使用reduceByKey，因为reduceByKey有局部聚合，所以在数据量大时比groupByKey效率高
+
+reduceByKey(_+_,3)
+				指定reduce的个数
+
+reduceByKey(_+_,0) 用map输出
+----------------------------------------------------------------------------
+笛卡尔积
+rdd1.cartesian(rdd2)
+得
+Array(((tom,1),(jerry,9)), ((tom,1),(tom,8)), ((tom,1),(shuke,7)), ((tom,1),(tom,2)), ((jerry,2),(jerry,9)), ((jerry,2),(tom,8)), ((jerry,2),(shuke,7)), ((jerry,2),(tom,2)), ((kitty,3),(jerry,9)), ((kitty,3),(tom,8)), ((kitty,3),(shuke,7)), ((kitty,3),(tom,2)))
+---------------------------------------------------------------------------------
+
+管线命令
+对操作系统做命令
+val rdd = sc.parallelize(Array("/Users/wangyadi"))
+val rdd2: RDD[String] = rdd.pipe("ls")
+
+------------------------------------------------------------------------------
+
+coalesce减少分区,repartition再分区，可增可减
+val conf = new SparkConf().setAppName("coalesceTest").setMaster("local[*]")
+    val sc = new SparkContext(conf)
+
+    val rdd1: RDD[String] = sc.parallelize(Array("hello world jack","hi tom marry hank","mydog is doudou","hay hank tom world"),4)
+
+    println(s"rdd1 = ${rdd1.partitions.length}")
+
+    val rdd2: RDD[(String, Int)] = rdd1.flatMap(_.split(" ")).map((_,1))
+
+    println(s"rdd2 = ${rdd2.partitions.length}")
+
+    val rdd3 = rdd2.coalesce(2)
+
+    println(s"rdd3 = ${rdd3.partitions.length}")
+
+    val rdd4 = rdd3.repartition(5)
+
+    println(s"rdd4 = ${rdd4.partitions.length}")
+
+----------------------------------------------------------------------------------------
+RDD的算子分为两类，一类是Transformation(lazy)，一类是Action（触发任务执行）
+RDD不存在真正要计算的数据，而是记录了RDD的转换关系，调用了什么方法，传入什么函数
+---------------------------------------------------------------------------------
+SparkShell中通过parallelize将本地集合并行化时，默认的分区是sparkshell启动时配置的cores数
+---------------------------------------------------------------------------------
+rdd.partitions.length 获得RDD分区的数量
+Spark允许最小的分区数量是2
+---------------------------------------------------------------------------------
+top(3)，将集合排序，返回前三个
+take(2), 取集合里的前两个
+takeOrdered(3)  将集合排序，返回前三个，默认升序
+---------------------------------------------------------------------------------
+RDD的map方法，真正在Executor中执行时，是一条一条的将数据拿出来处理
+
+mapPartitionsWithIndex 一次拿出一个分区（分区中并没有数据，而是记录要读取哪些数据，真正生成的Task会读取多条数据），并且可以将分区的编号取出来
+
+功能：取分区中对应的数据时，还可以将分区的编号取出来，这样就可以知道数据是属于哪个分区的（哪个分区对于的Task的数据）
+val rdd = sc.parallelize(List(1,2,3,4,5,6,7,8,9),2)
+val func = (index: Int, it: Iterator[Int]) => {
+    it.map(e => s"part: $index, ele: $e")
+}
+val rdd2 = rdd.mapPartitionsWithIndex(func)
+rdd2.collect
+得到
+Array(part: 0, ele: 1, part: 0, ele: 2, part: 0, ele: 3, part: 0, ele: 4, part: 1, ele: 5, part: 1, ele: 6, part: 1, ele: 7, part: 1, ele: 8, part: 1, ele: 9)
+----------------------------------------------------------------------------------
+rdd.aggregate(0)(_+_,_+_)
+            初始值 局部 全局
+rdd.aggregate(0)(math.max(_,_),_+_)
+局部和全局函数都会应用初始值
+--------------------------------------------------------------------------------
+aggregateByKey 
+val pairRDD = sc.parallelize(List(("cat",2),("cat",5),("mouse",4),("dog",12),("mouse",2)),2)
+现在要按key相加
+pairRDD.aggregateByKey(0)(_+_,_+_).collect
+                     注意：初始值只会在局部聚合中使用，不会在全局聚合中使用
+--------------------------------------------------------------------------------
+collectAsMap 阻塞方法？
+
+--------------------------------------------------------------------------------
+val rdd3 = sc.parallelize(List(("a",1),("b",2),("b",2),("c",2),("c",1)))
+rdd3.countByKey()
+得到 scala.collection.Map[String,Long] = Map(a -> 1, b -> 2, c -> 2)
+注意统计的是key出现的次数，和value没关系
+
+rdd3.filterByRange("a","b")
+得到Array[(String, Int)] = Array((a,1), (b,2), (b,2))
+
+------------------------------------------------------------------------------
+flatMapValues(_.split(" "))
+对元组里的values进行flatMap
+
+----------------------------------------------------------------------------
+foldByKey
+val rdd4 = sc.parallelize(List("dog","wolf","cat","bear"),2)
+val rdd5 = rdd4.map(x => (x.length,x))
+rdd5.foldByKey("")(_+_)
+得到Array[(Int, String)] = Array((4,wolfbear), (3,catdog))
+
+aggregateByKey("")(seqOp,comOp)  reduceByKey()   foldByKey   combineByKey调用的都是combineByKeyWithClassTag
+
+-------------------------------------------------------------------------------
+需要重点理解的方法
+aggregate 只能对RDD[U] 里面只有一个元素的RDD进行操作  Action方法
+aggregateByKey 只能对RDD[(K,U)]进行操作   Transformation方法
+reduceByKey    Transformation方法
+
+map            Transformation方法
+mapValues      Transformation方法
+mapPartions    Transformation方法
+mapPartionsWithIndex    Transformation方法
+
+filter  Transformation方法
+
+foreach        Action方法
+foreachPartition     Action方法
+saveAsTextFile   Action方法
+collect         Action方法
+---------------------------------------------------------------------------------
+val rdd = sc.parallelize(List(1,2,3,4,5,6,7,8,9),2)
+rdd.foreach(e => println(e*100+""))
+数据打印在Executor端
+
+------------------------------------------------------------------------------
+rdd.foreachPartition(it => it.foreach(x => println(x * 100))) //异步方法  Action
+每次拿出一个分区进行操作
+
+foreach一条一条拿，foreachPartition一次拿一个分区
+-----------------------------------------------------------------------------------
+拉链操作 zip
+val rdd4 = sc.parallelize(List("dog","cat","gnu","salmon","rabbit","turkey","wolf","bear","bee"),3)
+val rdd5 = sc.parallelize(List(1,1,2,2,2,1,2,2,2),3)
+val rdd6 = rdd5.zip(rdd4)
+得到Array((1,dog), (1,cat), (2,gnu), (2,salmon), (2,rabbit), (1,turkey), (2,wolf), (2,bear), (2,bee))
+------------------------------------------------------------------------
+combinByKey详情见combinByKey详解.png
+------------------------------------------------------------------------------
+Spark自定义分区器
+定义一个类，继承org.apache.spark.Partitioner
+实现
+	def numPartitions: Int
+	def getPartition(key: Any): Int方法
+在rdd中使用 rdd.partitionBy(new MyPartitioner)返回一个新的已经分好区的RDD，上游在shuffle的时候调用自定义的分区器分区
+上游分区好以后，把信息告诉Driver，下游读取Driver的信息后到相应位置拉取数据
+---------------------------------------------------------------------------------
+Spark Cache
+var lines = sc.textFile()
+val cached = lines.cache()  //标记这个RDD以后执行时会被cache，lazy
+lines.count  //触发Action存内存
+在管理界面Storage标签里看被缓存的数据
+数据缓存在Executor端
+
+cached.unpersist(true) //同步释放缓存
+cached.unpersist(false) //异步执行释放缓存
+
+什么时候进行cache
+	1.要求计算速度快
+	2.集群资源要足够大
+	3.重要：cache的数据会多次触发Action
+	4.先进行过滤，然后将缩小范围的数据再cache到内存
+----------------------------------------------------------------------------------
+分布式内存文件系统
+Tachyon 改名
+alluxio
+-----------------------------------------------------------------------------------
+checkpoint
+什么时候做checkpoint
+	1.迭代计算，要求保证数据安全
+	2.对速度要求不高（跟cache到内存进行对比）
+	3.将中间结果保存到hdfs
+sc.setCheckpointDir("hdfs://hdp12/ck20190131")
+rdd.checkpoint  //lazy方法
+
+//设置checkpoint目录（分布式文件系统的目录hdfs目录）
+//经过复杂计算，得到中间结果
+//将中间结果checkpoint到指定的hdfs目录
+//后续的计算，就可以使用前面ck的数据了
+//一个rdd同时有被persist和checkpoint，优先使用cache
+------------------------------------------------------------------------------------
+广播变量
+val broadcastRules: Broadcast[Array[(Long, Long, String)]] = sc.broadcast(rules)
+调用broadcastRules.value就可以在Executor中拿到
+
+//Task是在Driver端生成的，广播变量的引用是伴随着Task被发送到Executor中的
+-----------------------------------------------------------------------------
+case class function1(name: String) 构造器参数不用加val/var修饰
+----------------------------------------------------------------------------------
+Spark从Mysql中读取数据
+创建org.apache.spark.rdd.JdbcRDD
+new JdbcRDD(sc,() => {DriverManager.getConnection("dbc:mysql://node3:3306/bigdata?useUnicode=true&characterEncoding=utf8","root","password")},"SELECT * FROM TABLE WHERE id >= ? AND id <= ?",1L,100L,2,rs => {
+	val id = rs.getLong(1)
+	val name = rs.getString(2)
+	val age = rs.getInt(3)
+	(id,name,age)
+})
+jdbcRDD的小问题
+where 一定要用 >=  <= 包含，否则，rdd分区在读数据的时候会运用不包含丢数据
+------------------------------------------------------------------------------------
+Spark任务执行的流程
+
+四个步骤
+1.构建DAG（调用RDD上的方法）
+2.DAGScheduler将DAG切分Stage（切分的依据是Shuffle），生成Task以TaskSet的形式给TaskScheduler
+3.TaskScheduler调度Task（根据资源情况将Task调度到相应的Executor中执行）
+4.Executor接收Task，然后将Task丢入到线程池中执行
+
+----------------------------------------------------------------------------------------
+1.构建DAG
+DAG 有向无环图（数据执行过程，有方向，无闭环）
+
+DAG描述多个RDD的转换过程，任务执行时，可以按照DAG的描述，执行真正的计算（数据被操作的过程）
+
+DAG是有边界的：开始（通过SparkContext创建的RDD），结束（触发Action，调用runJob），一个完整的DAG就形成了
+
+一个RDD只是描述了数据计算过程中的一个环节，而DAG由一到多个RDD组成，描述了数据计算过程中的所有环节（过程）
+
+一个Spark任务Application中有多少个DAG，有一到多个（取决于触发了多少次Action）
+
+-----------------------------------------------------------------------------------------
+2.DAGScheduler
+一个DAG中可能产生多种不同类型和功能的Task，会有不同的阶段
+
+DAGScheduler：将一个DAG切分成一到多个Stage，DAGScheduler切分的依据是Shuffle（宽依赖）
+
+为什么要切分Stage？
+	一个复杂的业务逻辑（将多台机器上具有相同数据的数据聚合到一台机器上：Shuffle）
+	如果有shuffle，那么就意味着前面阶段产生结果后，才能执行下一个阶段，下一个阶段的计算要依赖上一个阶段的数据
+	在同一个Stage中，会有多个算子，我们称为pipeline（流水线：严格按照流程、顺序执行），多个算子可以被合并在一起
+---------------------------
+Narrow Dependencies(窄依赖)
+map,filter union
+特殊情况 join with inputs co-partitioned
+--------------------------
+Shuffle的定义
+	shuffle的含义是洗牌，将数据打散，父RDD一个分区中的数据如果给了子RDD的多个分区，只要存在这种可能，就是shuffle
+	shuffle会有网络传输，但是有网络传输并不意味着就是shuffle
+-------------------------
+Wide Dependencies(宽依赖)
+groupByKey join with no-co-partitioned
+
+--------------------------------------------------------------------------
+spark Executor中引用Driver端变量的问题
+见 每读取一条数据new一个rules.png 每个Task有独立的rules.png  一个Executor中多个Task共用一个rules.png  rules在Executor中实例化.png
+
+---------------------------------------------------------------------------------
+SimpleDateFormat是线程不安全的，如果多个Task在一个Executor中同时使用，要用线程安全的
+用FastDateFormat就是线程安全的
+
+---------------------------------------------------------------------------------
+SparkSQL是spark上的高级模块，SparkSQL是一个SQL解析引擎，将SQL解析成特殊的RDD(DataFrame)，然后在Spark集群中运行
+
+SparkSQL是用来处理结构化数据的，（先将非结构化的数据转换成结构化数据）
+
+SparkSQL支持两种编程API
+	1.SQL方式
+	2.DataFrame的方式（DSL）
+
+SparkSQL兼容hive，元数据库、SQL语法、UDF】序列化，反序列化
+
+SparkSQL支持统一的数据源，可以读取多种类型的数据
+
+SparkSQL提供了标准的连接（JDBC、ODBC），以后可以对接BI工具
+
+----------------------------------------------------------------------------------------
+
+RDD和DataFrame的区别
+
+DataFrame里存放的是结构化数据的描述信息，DataFrame要有表头（表的描述信息），描述了有多少列，每一列叫什么名字，什么类型，能不能为空
+
+DataFrame是一个特殊的RDD（RDD+Schema信息就变成了DataFrame）
+
+----------------------------------------------------------------------------------------
+SparkSql的第一个入门程序
+
+首先在pom中添加sparkSQL的依赖
+<dependency>
+    <groupId>org.apache.spark</groupId>
+    <artifactId>spark-sql_2.11</artifactId>
+    <version>${spark.version}</version>
+</dependency>
+
+SparkSQL 1.x和2.x的变成API有一些变化，企业中都有使用
+
+先用1.x的方式
+	创建一个SQLContext
+
+	//创建SparkSql的连接
+    //sparkcontext不能创建特殊的rdd（DataFrame）
+    //将sparkContext包装进而增强
+	val sc = new SparkContext(conf)
+	val sqlContext = new SQLContext(sc)
+
+	//创建特殊的RDD，先有一个普通的RDD，然后再关联上schema信息，进而转换成DataFrame
+	val lines: RDD[String] = sc.textFile(args(0))
+	//把数据关联case class或普通的class 将非结构化数据变成结构化数据
+
+	case class Boy(id: Long, name: String, age: Int, fv: Double)
+
+	val boys: RDD[Boy] = lines.map(line => {
+      val fields = line.split(",")
+      val id = fields(0).toLong
+      val name = fields(1)
+      val age = fields(2).toInt
+      val fv = fields(3).toDouble
+
+      Boy(id, name, age, fv)
+    })
+
+    //该RDD装的是Boy类型的数据，有了schema信息，但是还是一个RDD
+    //将RDD转换成DataFrame
+    import sqlContext.implicits._
+    val boyFrame: DataFrame = boys.toDF
+
+    //变成DF后就可以使用两种API进行编程了
+    //第一种方式，sql的方式
+    //先注册临时表，把DataFrame注册成临时表
+    boyFrame.registerTempTable("t_boy")
+    //书写SQL（SQL方法是Transformation）
+    val reulst: DataFrame = sqlContext.sql("SELECT * FROM t_boy ORDER BY fv DESC,age ASC")
+
+    reulst.show()
+------------------------------------------------------------------------------------------------
+
+将普通rdd变成dataframe的第二种方式
+val boys: RDD[Row] = lines.map(line => {
+      val fields = line.split(",")
+      val id = fields(0).toLong
+      val name = fields(1)
+      val age = fields(2).toInt
+      val fv = fields(3).toDouble
+
+      Row(id, name, age, fv)
+    })
+    //该RDD装的是Boy类型的数据，有了schema信息，但是还是一个RDD
+    //将RDD转换成DataFrame第二种方式
+
+    val schema: StructType = StructType(List(
+      new StructField("id", LongType, false),
+      new StructField("name", StringType, true),
+      new StructField("age", IntegerType, true),
+      new StructField("fv", DoubleType, true)
+    ))
+
+    val boyFrame: DataFrame = sqlContext.createDataFrame(boys,schema)
+
+------------------------------------------------------------------------------------------------
+DSL(DataFrame API)
+导入隐式转换
+import  sqlContext.implicits._
+val df1: DataFrame = boyFrame.select("name","age","fv")
+//val whered = df1.where($"fv" > 99 )
+val ordered: Dataset[Row] = df1.orderBy($"fv" desc,$"age" asc)
+
+
+2.x的方式
+	创建一个SparkSession
+val spark: SparkSession = SparkSession.builder().appName("sqlWordCount").master("local[*]").getOrCreate()
+//Dataset也是分布式数据集，是对RDD进一步封装，是更加只能的RDD
+val lines: Dataset[String] = spark.read.textFile(args(0))
+
+----------------------------------------------------------------------------------
+join的代价太昂贵，而且非常慢，解决思路是将小表缓存起来（广播变量）
+
+Spark自定义函数 （UDF，UDAF）
+	UDF   输入一行，返回一个结果  一对一
+	UDTF  输入一行，返回多行     一对多
+	UDAF  输入多行，返回一行     多对一
+
+UDF
+定义并注册
+	spark.udf.register("ip2Province",(ipNumber: Long) => {
+      //查找ip规则，而ip规则事先已经广播了，已经在Executor中了
+      //函数的逻辑是在Executor中执行的
+      val index: Int = IpUtil.binarySearch(broadcastRef.value,ipNumber)
+      var province = "未知"
+      if(index != -1){
+        province = (broadcastRef.value)(index)._3
+      }
+      province
+    })
+调用
+	val result: DataFrame = ipDF.select(callUDF("ip2Province",$"ip") as "cityName")
+      .groupBy($"cityName").agg(count("*") as "cnts").orderBy($"cnts" desc)
+    result.show()
+---------------------------------------
+
+UDTF 在hive中有，SparkSQL中没有
+Spark中用flatMap即可实现该功能
+
+---------------------------------------
+
+UDAF 自定义聚合函数  
+count sum avg max min这些是sparkSQL自带的聚合函数，但是复杂的业务，要自己定义
+
+自定义一个类，继承UserDefinedAggregateFunction
+实现8个方法
+class GeoMean extends UserDefinedAggregateFunction {
+
+  //输入数据的类型
+  override def inputSchema: StructType = StructType(List(StructField("value",DoubleType)))
+  //产生中间结果的数据类型
+  override def bufferSchema: StructType = StructType(List(
+    //参与运算数字的个数
+    StructField("counts", LongType),
+    //相乘之后返回的积
+    StructField("product", DoubleType)
+  ))
+
+  //最终返回的结果类型
+  override def dataType: DataType = DoubleType
+
+
+  override def deterministic: Boolean = true
+
+  //指定初始值
+  override def initialize(buffer: MutableAggregationBuffer): Unit = {
+    //参与运算数字个数的初始值
+    buffer(0) = 0L
+    //参与相乘的初始值
+    buffer(1) = 1.0
+  }
+
+  //每有一条数据参与运算就更新一下中间结果（update相当于在每一个分区中的运算）
+  override def update(buffer: MutableAggregationBuffer, input: Row): Unit = {
+    //参与运算的个数更新
+    buffer(0) = buffer.getLong(0) + 1L
+    //每有一个数字参与运算就进行相乘（包含中间结果）
+    buffer(1) = buffer.getDouble(1) * input.getDouble(0)
+  }
+
+  //全局聚合
+  override def merge(buffer1: MutableAggregationBuffer, buffer2: Row): Unit = {
+    //每个分区参与运算的中间结果进行相加
+    buffer1(0) = buffer1.getLong(0) + buffer2.getLong(0)
+    //每个分区计算的结果进行相乘
+    buffer1(1) = buffer1.getDouble(1) * buffer2.getDouble(1)
+  }
+
+  //计算最终结果
+  override def evaluate(buffer: Row): Any = {
+    Math.pow(buffer.getDouble(1),1.toDouble/buffer.getLong(0))
+  }
+}
+
+调用有两种方式
+方式一、
+val geomean = new GeoMean
+spark.udf.register("gm",geomean)
+
+import org.apache.spark.sql.functions._
+import spark.implicits._
+
+val powData: DataFrame = range.select(callUDF("gm",$"id") as "result")
+
+方式二、
+val geomean = new GeoMean
+import spark.implicits._
+val powData = range.agg(geomean($"id").as("result"))
+
+------------------------------------------------------------------------------------
+
+Dataset是spark1.6以后推出的新的API，也是一个分布式数据集，于RDD相比，保存了很多的描述信息，概念上等同于关系型数据库中的二维表，基于保存了很多的描述信息，spark在运行时可以被优化。
+
+Dataset里面对应的数据时强类型的，并且可以使用功能更加丰富的lambda表达式，弥补了函数式编程的一些缺点，使用起来更加方便
+
+在scala中，DataFrame其实就是Dataset[Row]
+
+Dataset的特点：
+	1.一系列分区
+	2.每个切片上会有对应的函数
+	3.依赖关系
+	4.kv类型shuffle也会有分区器
+	5.如果读取hdfs中的数据会感知最优位置
+	6.会优化执行计划
+	7.支持智能数据源
+
+调用Dataset的方法先会生成逻辑计划，然后被spark的优化器进行优化，最终生成物理计划，然后提交集群中运行
+
+硬编码要执行的更快，spark dataset把手写的代码转换成硬编码执行  
+
+--------------------------------------------------------------------------------------------
+
+sparkSession读取jdbc数据源
+val access: DataFrame = spark.read.format("jdbc").options(
+      Map("url" -> "jdbc:mysql://192.168.56.103:3306/bigdata",
+        "driver" -> "com.mysql.jdbc.Driver",
+        "dbtable" -> "access",
+        "user" -> "root",
+        "password" -> "az63091919")
+    ).load()
+
+-----------------------------------------------------------------------------------------------
+
+保存到jdbc
+//保存到jdbc
+    val props = new Properties()
+    props.put("user","root")
+    props.put("password","az63091919")
+    fitler.write.mode("ignore").jdbc("jdbc:mysql://192.168.56.103:3306/bigdata?useUnicode=true&characterEncoding=utf8","access1",props)
+
+mode：
+	overwrite  覆盖
+	append     追加
+	ignore     如果表存在，不做任何操作，如果表不存在自动创建表并写入数据
+	error
+
+------------------------------------------------------------------------------------------------
+
+保存到文件里，Dataset或DataFrame只能有一列，且是String类型的
+fitler.write.text("/Users/wangyadi/Desktop/text")
+
+-------------------------------------------------------------------------------------------
+
+保存到json里
+    access.write.json("/Users/wangyadi/Desktop/json")
+
+-----------------------------------------------------------------------------------------------------
+
+保存到csv里
+    access.write.csv("/Users/wangyadi/Desktop/csv")
+    result.show()
+
+csv读出来的数据都没有schema信息，且都是String类型
+
+-----------------------------------------------------------------------------------------------------
+
+保存到parqut里，智能数据源
+    access.write.parquet("/Users/wangyadi/Desktop/parquet")
+
+-------------------------------------------------------------------------------------------------------
+
+读取json数据源
+	val jsonData = spark.read.json("/Users/wangyadi/Desktop/json")
+
+-----------------------------------------------------------------------------------------------------
+
+读取csv数据源
+	val csv: DataFrame = spark.read.csv("/Users/wangyadi/Desktop/csv")
+
+    csv.printSchema()
+
+    val result: DataFrame = csv.toDF("cityName","cnts")
+
+
+---------------------------------------------------------------------------------------------------------------
+
+读取parqut文件
+	val parquetLine: DataFrame = spark.read.parquet("/Users/wangyadi/Desktop/parquet")
+
+    parquetLine.show()
+
+-----------------------------------------------------------------------------------------------------------
+
+Spark SQL DSL风格窗口函数
+.select($"subject",$"teacher",$"cnts"                                                                   
+  ,row_number().over(Window.partitionBy($"subject").orderBy($"cnts" desc)).as("sub_rk")                 
+  ,row_number().over(Window.orderBy($"cnts" desc)) as "g_rk")                                           
+
+-------------------------------------------------------------------------------------------------------------
+
+spark三种join实现
+
+Broadcast Join
+	将小表广播到Executor中，大表在每个分区中和小表join
+//强制设置BroadcastJoin执行，最大缓存10M
+    spark.conf.set("spark.sql.autoBroadcastJoinThreshold",1024*1024*10)
+----------------------
+
+Shuffle Hash Join
+	两个表按照相同的Partitioner分区，再join
+
+	spark2.0默认 BroadcaHashJoin
+
+-----------------------
+
+Sort Merge Join
+	两张大表，先全局排序，再join，rdd默认排序用rangePartitioner
+
+	//强制设置SortMergeJoin执行
+    spark.conf.set("spark.sql.autoBroadcastJoinThreshold",-1)
+
+-----------------------
+在spark2.0中，broadcast Join和Shuffle Hash Join合并为 BroadcastHashJoin
+
+-------------------------------------------------------------------------------------------------------------
+
+Hive On Spark
+
+把hive安装包下的hive-sit.xml拷贝到spark的conf目录下
+
+./spark-sql --master spark://node-4:7077,node-5:7077 --driver-class-path /home/xiaoniu/mysql-connector-java-5.1.7-bin.jar
+
+sparkSQL会在mysql上创建一个database，需要手动改一下DBS表中的DB_LOCATION_UIR改成hdfs的地址
+
+添加export HADOOP_CONF_DIR=/usr/local/hadoop2.8.5/etc/hadoop
+
+--------------------------------------------------------------------------------
+
+当hive在spark上运行以后，hive本身可能会出现连接不上mysql的情况
+这时，在hive-site.xml上添加一个配置
+<property>
+  <name>hive.metastore.schema.verification</name>
+  <value>false</value>
+</property>
+
+-------------------------------------------------------------------------------------------------------------
+
+Driver端连接mysql数据库，获取schema信息
+
+----------------------------------------------------------------------------------------------------------
+
+spark-sql  
+	-e  SQL from command line
+	-f filename  SQL from files
+
+//在代码中启用spark对hive的支持
+
+在pom中加入
+<dependency>
+            <groupId>org.apache.spark</groupId>
+            <artifactId>spark-hive_2.11</artifactId>
+            <version>${spark.version}</version>
+        </dependency>
+
+//想要使用hive的元数据库，必须指定hive元数据库的位置，添加一个hive-site.xml到当前程序的classpath下即可
+//想要访问hdfs中存储的数据，必须把hdfs-site.xml和core-site.xml
+
+val spark = SparkSession
+    .builder().appName("HiveOnSpark").master("local[*]")
+    .enableHiveSupport().getOrCreate()
+
+创建表的时候需要hadoop用户身份
+System.setProperty("HADOOP_USER_NAME", "root") // 伪装客户端的用户身份为root
+//  或者添加运行参数 –DHADOOP_USER_NAME=root
+
+-----------------------------------------------------------------------------------------------------------
+
+启动spark-thriftserver服务器(相当于hiveserver2)
+
+在yarn上启动
+spark/sbin/start-thriftserver.sh --master yarn --deploy-mode client --queue default --num-executors 5 --driver-memory 1g --jars /root/mysql-connector-java-5.1.32.jar
+
+在sparkstandalone上启动
+spark/sbin/start-thriftserver.sh --master spark://node1:7077,node2:7077 --jars /root/mysql-connector-java-5.1.32.jar
+
+启动spark自带的beeline
+/usr/local/spark-2.4.0-bin-hadoop2.7/bin/beeline
+输入   !connect jdbc:hive2://localhost:10000
+	   Enter username for jdbc:hive2://localhost:10000: root
+
+maven加载依赖
+<!-- https://mvnrepository.com/artifact/org.apache.hive/hive-jdbc -->
+        <dependency>
+            <groupId>org.apache.hive</groupId>
+            <artifactId>hive-jdbc</artifactId>
+            <version>1.2.2</version>
+        </dependency>
+        <!-- https://mvnrepository.com/artifact/org.apache.hadoop/hadoop-common -->
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-common</artifactId>
+            <version>2.8.5</version>
+        </dependency>
+在程序里可以写
+public static void main(String[] args) throws ClassNotFoundException, SQLException {
+        Class.forName("org.apache.hive.jdbc.HiveDriver");
+        Connection conn = DriverManager.getConnection("jdbc:hive2://node1:10000", "root", "");
+
+        Statement st = conn.createStatement();
+        st.execute("create table mydb.t_employee(id int,name string,age int,state string,city string) row format delimited fields terminated by ','");
+
+        st.execute("load data inpath 'student.dat' into table mydb.t_employee");
+
+        st.execute("SET hive.exec.dynamic.partition=true");
+        st.execute("SET hive.exec.dynamic.partition.mode=nonstrict");
+
+        st.execute("create table mydb.t_user_depart(id int,name string,age int) partitioned by(sta string, ct string) row format delimited fields terminated by ','");
+
+        st.execute("insert into table mydb.t_user_depart partition(sta,ct) select id,name,age,state,city from mydb.t_employee");
+
+        st.close();
+        conn.close();
+    }
+spark写入桶表要配置
+hive on spark 写入桶表
+要设置两个配置
+Creating Hive bucketed table is supported from Spark 2.3 (Jira SPARK-17729). Spark will disallow users from writing outputs to hive bucketed tables, by default.
+
+Setting `hive.enforce.bucketing=false` and `hive.enforce.sorting=false` will allow you to save to hive bucketed tables. 
+
+
+------------------------------------------------------------------------------------------------------------
+
+Kafka的一些概念
+	Broker：按装Kafka服务的那台机器就是一个broker（broker的id要全局唯一）
+	Producer：消息的生产者，负责将数据写入到broker中（push）
+	Consumer：消息的消费者，负责从kafka中读取数据（pull），老版本的消费者需要依赖zk，新版本的不需要
+	Topic：主题，相当于是数据的一个分类，不同的topic存放不同的数据
+	Consumer Group：消费者组，一个Topic可以有多个消费者同时消费，多个消费者如果在一个消费者组中，那么它们不能重复消费数据
+
+------------------------------------------------------------------------------------------------------------
+
+Kafka0.8安装
+修改config/server.properties
+	broker.id=0  要全局唯一
+	log.dirs=    kafka存数据的地址
+	num.partitions=   kafka的物理分区
+	log.retention.hours=168  kafka数据保存的策略默认168小时
+	zookeeper.connect=node3:2181,node4:2181,node5:2181  zookeeper的地址
+
+------------------------------------------------------------------------------------------------------------
+
+启动Kafka0.8
+	进入到kafka0.8安装目录，输入
+	bin/kafka-server-start.sh -daemon config/server.properties  后台启动kafka
+
+Kafka命令行操作
+
+列出当前有哪些topic
+	bin/kafka-topics.sh --list --zookeeper node3:2181,node4:2181,node5:2181
+-----------------------
+创建topic
+	bin/kafka-topics.sh --create --zookeeper node3:2181,node4:2181,node5:2181 --replication-factor 3 --partitions 3 --topic mytopic
+
+	--replication-factor  //存几分副本
+	--partitions  //几个分区
+------------------------
+查看topic详细信息
+bin/kafka-topics.sh --describe --zookeeper node3:2181,node4:2181,node5:2181 --topic mytopic
+------------------------
+向topic里写入数据
+bin/kafka-console-producer.sh --broker-list node2:9092,node3:9092,node4:9092 --topic mytopic
+--------------------------
+从头消费topic的数据
+bin/kafka-console-consumer.sh --zookeeper node3:2181,node4:2181,node5:2181 --topic mytopic --from beginning
+从启动开始消费topic的数据
+bin/kafka-console-consumer.sh --zookeeper node3:2181,node4:2181,node5:2181 --topic mytopic
+
+bin/kafka-console-consumer.sh --bootstrap-server node2:9092,node3:9092,node4:9092 --topic storm-produce --from beginning
+
+------------------------------------------------------------------------------------------------------------
+
+Kafka进程是不分主从，但是分区有leader分区和follower分区，leader分区负责读写，follower分区负责同步数据。
+Kafka可以将读写的压力均摊到多台机器上，从而提高了读写能力。
+在生产环境上配置副本保存3份，分区的数量是broker的数量*每台机器上可用的核数
+从分区负责同步数据，也可以配置从分区负责读
+
+---------------------
+
+Topic:mytopic	PartitionCount:3	ReplicationFactor:3	Configs:
+	Topic: mytopic	Partition: 0	Leader: 0	Replicas: 0,1,2	Isr: 0,1,2
+	Topic: mytopic	Partition: 1	Leader: 1	Replicas: 1,2,0	Isr: 1,2,0
+	Topic: mytopic	Partition: 2	Leader: 2	Replicas: 2,0,1	Isr: 2,0,1
+
+mytopic有三个分区
+	0号分区 Leader在borker.id=0的机器上，副本在0，1，2  副本传递顺序是 0，1，2
+
+----------------------------------------------------------------------------------------------------------
+
+spark steaming工作最少需要两个task，一个是receiver（负责接收数据）一个是calculater（负责业务逻辑），详见nc命令图解
+
+----------------------------------------------------------------------------------------------------------
+
+spark steaming与kafka0.8版本集成，receiver方式
+
+val conf = new SparkConf().setAppName("KafkaWordCount").setMaster("local[*]")
+
+    val ssc = new StreamingContext(conf, Seconds(5))
+
+    val zkQuorm = "node3:2181,node4:2181,node5:2181"
+    val groupId = "g1"
+    //topic和对应的线程
+    val topic = Map[String,Int]("mytopic" -> 1)
+
+    //创建DStream，需要KafkaDStream
+    //Kafka的ReceiverInputDStream里面装的是元组，key是往kafka里写的时候的key，value是实际写入的值
+    val kafkaData: ReceiverInputDStream[(String, String)] = KafkaUtils.createStream(ssc, zkQuorm, groupId, topic)
+
+----------------------------------------------------------------------------------------------------------
+
+做累加wordcount
+用updateStateByKey，但是这种方式已经过时了
+    val reduced: DStream[(String, Int)] = wordAndOne.updateStateByKey(updateFunc, new HashPartitioner(ssc.sparkContext.defaultParallelism), true)
+
+/**
+    * 第一个参数：聚合的key，就是单词
+    * 第二个参数：当前批次该单词在每一个分区出现的次数
+    * 第三个参数：初始值或累加的中间结果
+    */
+  val updateFunc = (iter: Iterator[(String,Seq[Int],Option[(Int)])]) => {
+    //iter.map(t => (t._1,t._2.sum + t._3.getOrElse(0))) 或使用模式匹配
+    iter.map{
+      case(x,y,z) => (x, y.sum + z.getOrElse(0))
+    }
+  }
+
+----------------------------------------------------------------------------------------------------
+
+sparkstreaming window
+batch interval: 批次的间隔
+windows length： 窗口的长度，跨批次，是批次间隔的整数倍   一次查之前多少批次
+side interval：滑动间隔   隔多长时间查一次，是批次的整数倍
+
+package com.wyd.javacode;
+
+import org.apache.spark.SparkConf;
+import org.apache.spark.streaming.Durations;
+import org.apache.spark.streaming.api.java.JavaDStream;
+import org.apache.spark.streaming.api.java.JavaPairDStream;
+import org.apache.spark.streaming.api.java.JavaReceiverInputDStream;
+import org.apache.spark.streaming.api.java.JavaStreamingContext;
+import scala.Tuple2;
+
+import java.util.Arrays;
+
+public class JavaDStreamWindowDemo {
+    public static void main(String[] args) throws InterruptedException {
+        SparkConf conf = new SparkConf().setAppName("windowDemo").setMaster("local[*]");
+        JavaStreamingContext jssc = new JavaStreamingContext(conf, Durations.seconds(2));
+
+        JavaReceiverInputDStream<String> lines = jssc.socketTextStream("localhost", 9999);
+
+        JavaDStream<String> words = lines.flatMap(line -> Arrays.asList(line.split(" ")).iterator());
+
+        JavaPairDStream<String, Integer> wordAndOne = words.mapToPair(word -> new Tuple2<>(word, 1));
+        																									//向后取多长时间的数据
+        JavaPairDStream<String, Integer> reduced = wordAndOne.reduceByKeyAndWindow((i1, i2) -> i1 + i2, Durations.seconds(12), Durations.seconds(4));
+        //多长时间取一次
+        reduced.print();
+
+        jssc.start();
+        jssc.awaitTermination();
+    }
+}
+
+------------------------------------------------------------------------------------------------------------
+
+深入理解DStream，他是sparkStreaming中的一个最基本的抽象，代表了一系列连续的数据，本质上是一系列连续的RDD，你对DStream进行操作，就是对RDD进行操作
+
+每隔一个固定的时间，就会生成一个小的DAG（是因为RDD里面要计算对应的数据少），然后将这个小DAG提交到集群中，周而复始
+详见DStream图解.png
+
+DStream每隔一段时间生成一个RDD，你对DStream进行操作，本质上是对里面的对应时间的RDD进行操作
+
+DStream可以认为是一个RDD的工厂，该DStream里面生产的都是相同业务逻辑的RDD，只不过是RDD里面要读取的数据不相同
+
+DStream和DStream之间存在依赖关系，在一个固定的时间点，对应存在依赖关系的DStream对应的RDD也存在依赖关系
+每隔一个固定的时间，其实产生了一个小的DAG，周期性的将生成的小DAG提交到集群中执行
+
+-----------------------------------------------------------------------------------------------------------
+
+SparkStreaming的Receiver方式和直连方式有什么区别
+	Receiver接收固定时间间隔的数据（放在内存中的），使用Kafka高级的API，自动维护偏移量达到固定的时间才进行处理，效率低并且容易丢失数据
+	Direct直连方式，相当于RDD直接连接到Kafka的分区上，使用Kafka底层的API，效率高，需要自己维护偏移量。
+
+-----------------------------------------------------------------------------------------------------------
+
+spark 整合kafka0.8
+用zookeeper管理偏移量
+见SparkTest com.wyd.day09.KafkaDirectWordCountV2
+def main(args: Array[String]): Unit = {
+    //指定组名
+    val group = "a001"
+    //创建SparkConf
+    val conf = new SparkConf().setAppName("KafkaDirectWordCount").setMaster("local[*]")
+    //创建SparkStreaming，并设置间隔时间
+    val ssc = new StreamingContext(conf, Duration(5000))
+    //指定消费的topic名字
+    val topic = "wordcount"
+    //指定Kafka的broker地址
+    val brokerList = "node2:9092,node3:9092,node4:9092"
+    //指定zk的地址，后期更新消费的偏移量时使用（以后可以使用Redis、MySQL来记录偏移量）
+    val zkQuorum = "node3:2181,node4:2181,node5:2181"
+    //创建stream时使用的topic名字集合，SparkStreaming可以同时消费多个topic
+    val topics: Set[String] = Set(topic)
+
+    //创建一个ZKGroupTopicDirs对象
+    val topicDirs = new ZKGroupTopicDirs(group, topic)
+    //获取zookeeper中的路径 "/a001/offsets/wordcount"
+    val zkTopicPath = s"${topicDirs.consumerOffsetDir}"
+
+    //准备kafka的参数
+    //smallest代表最开始
+    val kafkaParams = Map(
+      "metadata.broker.list" -> brokerList,
+      "group.id" -> group,
+      "auto.offset.reset" -> kafka.api.OffsetRequest.SmallestTimeString
+    )
+
+    //zookeeper客户端，可以从zk中读取偏移量，并更新偏移量
+    val zKClient = new ZkClient(zkQuorum)
+    //查询该路径下是否字节点（默认有字节点为我们自己保存不同partition时生成）
+    //  组  /       / topic   /分区/ 偏移量
+    // /a001/offsets/wordcount/0/10001
+    // /a001/offsets/wordcount/1/61201
+    // /a001/offsets/wordcount/2/30001
+    val children: Int = zKClient.countChildren(zkTopicPath)
+
+    var kafkaStream: InputDStream[(String,String)] = null
+    //如果zookeeper中保存offset，我们会利用这个offset作为kafkaStream的起始位置
+    var fromOffsets: Map[TopicAndPartition, Long] = Map()
+
+    if(children > 0) {
+      for(i <- 0 until children) {
+        val partitionOffset: String = zKClient.readData[String](s"$zkTopicPath/${i}")
+        val tp: TopicAndPartition = TopicAndPartition(topic, i)
+        fromOffsets += (tp -> partitionOffset.toLong)
+      }
+      //Key:kafka的key  values：内容"hello tom hell jerry"
+      //这个会将kafka的消息进行transform，最终kafka的数据会变成（kafka的key，message）这样的tuple
+      val messageHandler = (mmd: MessageAndMetadata[String, String]) => (mmd.key(), mmd.message())
+
+      kafkaStream = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder, (String, String)](ssc, kafkaParams, fromOffsets, messageHandler)
+
+    } else {
+      //从头读，                    kafka中的key，v   key的解析器      v的解析器
+      kafkaStream = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc,kafkaParams,topics)
+    }
+
+    var offsetRanges = Array[OffsetRange]()
+
+    //直连方式只有在KafkaDStream的RDD中才能获取偏移量，那么就不能调用DStream的Transformation
+    //所以只能在KafkaStream中调用foreachRDD，获取RDD的偏移量，然后就是对RDD进行操作了
+    //依次迭代KafkaDStream中的KafkaRDD
+    //KafkaStream.foreachRDD里面的业务逻辑是在Driver端执行的
+    kafkaStream.foreachRDD(kafkaRDD => {
+      //只有kafkaRDD实现了HasOffsetRanges特质
+      offsetRanges = kafkaRDD.asInstanceOf[HasOffsetRanges].offsetRanges
+      //.map()是在executer中执行
+      val message: RDD[String] = kafkaRDD.map(_._2)
+
+      message.foreachPartition(partition => {
+        partition.foreach(x => {
+          println(x)
+        })
+      })
+
+      for (o <- offsetRanges) {
+        val zkPath = s"${topicDirs.consumerOffsetDir}/${o.partition}"
+        ZkUtils.updatePersistentPath(zKClient, zkPath, o.untilOffset.toString)
+      }
+    })
+    ssc.start()
+    ssc.awaitTermination()
+  }
+
+还可以用checkpoint存储偏移量，后续调查？这种方式已经过时
+
+------------------------------------
+
+spark整合kafka0.10，
+1、利用kafka自己存储偏移量
+见sparkkafka010  com.wyd.spark.MyWordCount
+
+CREATE TABLE `offset` (
+  `groupId` varchar(255) DEFAULT NULL,
+  `topic` varchar(255) DEFAULT NULL,
+  `partition` int(11) DEFAULT NULL,
+  `untilOffset` bigint(20) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8
+
+object MyWordCount {
+  var stopFlag:Boolean = false
+  val shutdownMarker = "hdfs://hdp12/tmp/shutdownmarker"
+
+  def main(args: Array[String]): Unit = {
+
+    val group = "g0"
+    val topic = "mywordcount"
+
+    val conf = new SparkConf().setAppName("MyWordCount")
+
+    val streamingContext = new StreamingContext(conf, Seconds(5))
+
+    val kafkaParams = Map[String, Object](
+      "bootstrap.servers" -> "node2:9092,node3:9092,node4:9092",
+      "key.deserializer" -> classOf[StringDeserializer],
+      "value.deserializer" -> classOf[StringDeserializer],
+      "group.id" -> group,
+      "auto.offset.reset" -> "earliest",  //lastest
+      "enable.auto.commit" -> (false: java.lang.Boolean)
+    )
+
+    val topics = Array(topic)
+
+    val stream = KafkaUtils.createDirectStream[String, String](
+      streamingContext,
+      //位置策略（如果kafka和spark程序部署在一起，会有最优位置感知）
+      LocationStrategies.PreferConsistent,
+      //订阅的策略（可以指定用正则的方式读取topic，比如my-orders-*）
+      ConsumerStrategies.Subscribe[String, String](topics, kafkaParams)
+    )
+
+    stream.foreachRDD(kafkaRDD => {
+      if(!kafkaRDD.isEmpty()) {
+        val offsetRanges = kafkaRDD.asInstanceOf[HasOffsetRanges].offsetRanges
+        val lines: RDD[String] = kafkaRDD.map(x => x.value())
+        val words: RDD[String] = lines.flatMap(_.split(" "))
+        val wordAndOne = words.map((_,1))
+        val reduced: RDD[(String, Int)] = wordAndOne.reduceByKey(_+_)
+        reduced.foreachPartition(it => {
+          val conn: Jedis = JedisConnectionPool.getConnection()
+          it.foreach(x => {
+            conn.incrBy(x._1,x._2.toLong)
+          })
+          conn.close()
+        })
+        //更新偏移量
+        stream.asInstanceOf[CanCommitOffsets].commitAsync(offsetRanges)
+      }
+    })
+
+    streamingContext.start()
+
+    val checkIntervalMillis = 10000
+    var isStopped = false
+
+
+    while (! isStopped) {
+      println("calling awaitTerminationOrTimeout")
+      isStopped = streamingContext.awaitTerminationOrTimeout(checkIntervalMillis)
+      if (isStopped)
+        println("confirmed! The streaming context is stopped. Exiting application...")
+      else
+        println("Streaming App is still running. Timeout...")
+      checkShutdownMarker
+      if (!isStopped && stopFlag) {
+        println("stopping ssc right now")
+        streamingContext.stop(true, true)
+        println("ssc is stopped!!!!!!!")
+      }
+    }
+  }
+
+  def checkShutdownMarker = {
+    if (!stopFlag) {
+      val fs = FileSystem.get(new Configuration())
+      stopFlag = fs.exists(new Path(shutdownMarker))
+    }
+
+  }
+}
+
+2、用关系型数据库存储偏移量
+见sparkkafka com.wyd.spark.OrderCalculate
+<dependency>
+<groupId>org.scalikejdbc</groupId>
+<artifactId>scalikejdbc_2.11</artifactId>
+<version>2.5.0</version>
+</dependency>
+object OrderCalculate {
+
+  def main(args: Array[String]): Unit = {
+
+    val conf = new SparkConf().setAppName("OrderCalculate").setMaster("local[*]")
+
+    val streamingContext = new StreamingContext(conf,Duration(5000))
+
+    //获取ip规则，然后广播
+    val lines = streamingContext.sparkContext.textFile("/Users/wangyadi/sparkData/ip/rule")
+    val rulesRdd: RDD[(Long, Long, String)] = lines.map(line => {
+      val fileds: Array[String] = line.split("[|]")
+      (fileds(2).toLong, fileds(3).toLong, fileds(6))
+    })
+    val rules: Array[(Long, Long, String)] = rulesRdd.collect()
+    //调用sc上的广播方法，将Driver端的数据广播到executor中
+    val broadcastRules: Broadcast[Array[(Long, Long, String)]] = streamingContext.sparkContext.broadcast(rules)
+
+    val groupId = "ag1"
+
+    val kafkaParams = Map[String, Object](
+      "bootstrap.servers" -> "node2:9092,node3:9092,node4:9092",
+      "key.deserializer" -> classOf[StringDeserializer],
+      "value.deserializer" -> classOf[StringDeserializer],
+      "group.id" -> groupId,
+      "auto.offset.reset" -> "earliest",
+      "enable.auto.commit" -> (false: java.lang.Boolean)
+    )
+
+    val topics = Array("orderList")
+
+    DBs.setup()
+    val fromdbOffset: Map[TopicPartition, Long] = DB.readOnly(
+      implicit session => {
+        SQL(s"select * from offset where groupId = '${groupId}'")
+          .map(rs => (new TopicPartition(rs.string("topic"), rs.int("partition")), rs.long("untilOffset")))
+          .list().apply()
+      }
+    ).toMap
+
+    val stream = if(fromdbOffset.size == 0){
+      KafkaUtils.createDirectStream[String, String](
+        streamingContext,
+        LocationStrategies.PreferConsistent,
+        ConsumerStrategies.Subscribe[String, String](topics, kafkaParams)
+      )
+    } else {
+      KafkaUtils.createDirectStream[String, String](
+        streamingContext,
+        LocationStrategies.PreferConsistent,
+        ConsumerStrategies.Assign[String, String](fromdbOffset.keys, kafkaParams, fromdbOffset)
+      )
+    }
+
+    stream.foreachRDD(kafkaRdd => {
+      val offsetRangs: Array[OffsetRange] = kafkaRdd.asInstanceOf[HasOffsetRanges].offsetRanges
+
+      if(!kafkaRdd.isEmpty()) {
+
+        val fileds: RDD[Array[String]] = kafkaRdd.map(_.value().split(" "))
+        fileds.foreachPartition(it => {
+          it.foreach(x => {
+            println(x.toBuffer)
+          })
+        })
+        CalculateUtils.calculateIncome(fileds)
+        CalculateUtils.calculateItem(fileds)
+        CalculateUtils.calculateIncomeZone(fileds, broadcastRules)
+        DB.localTx(
+          implicit session => {
+            for (or <- offsetRangs) {
+              SQL("replace into `offset` (groupId,topic,`partition`,untilOffset) values(?,?,?,?)")
+                .bind(groupId,or.topic,or.partition,or.untilOffset).update().apply()
+            }
+          }
+        )
+      }
+    })
+
+    streamingContext.start()
+    streamingContext.awaitTermination()
+
+  }
+
+-----------------------------------------------------------------------------------------------------------
+
+解压redis源码包到/usr/local/src
+tar -zxvf redis-3.2.11.tar.gz -C /usr/local/src/
+安装c编译器
+yum -y install gcc
+进入源码包目录
+make && make install
+在/usr/local/下创建一个redis目录，然后拷贝源码包下的redis.conf到/usr/local/redis
+修改redis.conf
+daemonize yes #redis后台运行
+appendonly #开启aof日志，它每次写操作都记录一条日志
+bind 192.168.56.101
+启动redis
+redis-server /usr/local/redis/redis.conf
+
+redis-cli -p 6379
+config set requirepass 123
+
+命令行输入密码
+auth 123456
+
+REDIS操作
+keys *
+set xiaoniu 1
+set xiaoniu 5
+get 'xiaoniu'
+incr 'xiaoniu'  加1
+incrby xiaoniu 100 加100
+decr xiaoniu  减1
+decrby xiaoniu 100  减100
+
+-----------------------------------------------------------------------------------------------------------
+
+redis集群
+
+安装ruby
+
+1、sudo yum install curl  安装curl
+ 2、http://www.rvm.io/ 官网首页就可以看到 
+ gpg --keyserver hkp://keys.gnupg.net --recv-keys 409B6B1796C275462A1703113804BB82D39DC0E3 7D2BAF1CF37B13E2069D6956105BD0E739499BDB
+ 3、下载rvm   \curl -sSL https://get.rvm.io | bash -s stable 
+或离线安装
+curl -sSL https://github.com/rvm/rvm/tarball/stable -o rvm-stable.tar.gz
+mkdir rvm && cd rvm
+tar --strip-components=1 -xzf ../rvm-stable.tar.gz
+./install --auto-dotfiles
+
+
+ 4、查找配置文件 find / -name rvm.sh 
+ 5、配置文件生效 source /etc/profile.d/rvm.sh 
+ 6、下载rvm依赖 rvm requirements 
+ 7、查看rvm库ruby版本 rvm list known
+ 8、安装ruby指定版本 rvm install ruby-2.4.1
+ 9、使用ruby版本默认 rvm use 2.4.1 default
+--------------------- 
+作者：Jabony 
+来源：CSDN 
+原文：https://blog.csdn.net/jabony/article/details/79977140 
+版权声明：本文为博主原创文章，转载请附上博文链接！
+
+gem install redis
+
+在各个机器上
+vi redis.conf
+bind 一定要绑定ip地址，不要绑主机名
+port 7000
+cluster-enabled yes
+cluster-config-file nodes.conf
+cluster-node-timeout 5000
+appendonly yes
+
+分别启动redis
+
+在安装ruby的那台机器上/usr/local/src/redis/src
+./redis-trib.rb create --replicas 1 192.168.56.101:7000 192.168.56.102:6379 192.168.56.103:6379 192.168.56.101:7001 192.168.56.104:6379 192.168.56.105:6379
+前三个为主节点，后三个为从节点
+
+停止redis集群
+分别在节点上执行kill -9 进程号，一定是-9，强制停止
+
+客户端连接集群
+redis-cli -c -h 192.168.56.101 -p 7000
+进入后输入cluter nodes查看集群节点
+
+---------------------------------------
+
+jedis连接池连接redis
+package cn
+
+import java.util
+
+import redis.clients.jedis.{JedisCluster, _}
+
+import scala.collection.mutable
+
+/**
+  * Created by zx on 2017/10/30.
+  */
+
+
+object JedisConnectPool {
+
+  private val config: JedisPoolConfig = new JedisPoolConfig()
+
+  //最大连接数
+  config.setMaxTotal(20)
+  //最大空闲连接数
+  config.setMaxIdle(10)
+  //当调用borrow Object方法时，是否进行有效性检查 -->
+  config.setTestOnBorrow(true)
+
+  //private val pool: JedisPool = new JedisPool(config, "192.168.100.101", 6379, 10000, "")
+
+  val jedisClusterNodes = new util.HashSet[HostAndPort]()
+  //Jedis Cluster will attempt to discover cluster nodes automatically
+  jedisClusterNodes.add(new HostAndPort("192.168.100.101", 6379))
+  jedisClusterNodes.add(new HostAndPort("192.168.100.102", 6379))
+  jedisClusterNodes.add(new HostAndPort("192.168.100.103", 6379))
+  jedisClusterNodes.add(new HostAndPort("192.168.100.104", 6379))
+  jedisClusterNodes.add(new HostAndPort("192.168.100.105", 6379))
+  jedisClusterNodes.add(new HostAndPort("192.168.100.106", 6379))
+  val jedisCluster = new JedisCluster(jedisClusterNodes)
+
+  def main(args: Array[String]): Unit = {
+    val str = jedisCluster.get("abc123")
+    println(str)
+  }
+}
+
+------------------------------------------
+
+redis扩容
+先新增两个节点192.168.56.102:8001（预计当主） 192.168.56.102:8007（预计当从）
+添加8001节点
+./redis-trib.rb add-node 192.168.56.102:8001 192.168.56.102:6379
+							新节点               集群中已存在的master节点
+然后查看cluster nodes
+记住新节点的id b54291991a9c6f77274462ff37a78cd6334db670
+b539dc70eecad953474e9893c0413496091d8931 192.168.56.103:6379 myself,master - 0 0 8 connected 10923-16383
+7d840c73f97040f64ff7379d9f662e80cfe3786b 192.168.56.101:7001 slave b539dc70eecad953474e9893c0413496091d8931 0 1552265445630 8 connected
+b54291991a9c6f77274462ff37a78cd6334db670 192.168.56.102:8001 master - 0 1552265444126 0 connected
+f0898fe0ae3b813e547f2548d552e430a97d37a5 192.168.56.101:7000 slave ddcb5c850180ef07555f46cc6e45c6d17aed6c2a 0 1552265444628 9 connected
+30b41d8a01ece0e0771a1e488f8eeba73a341b19 192.168.56.102:6379 master - 0 1552265446133 14 connected 5461-10922
+98ea450d82190aa8af16928c76baf4c5ccab6f9d 192.168.56.105:6379 slave 30b41d8a01ece0e0771a1e488f8eeba73a341b19 0 1552265445129 14 connected
+ddcb5c850180ef07555f46cc6e45c6d17aed6c2a 192.168.56.104:6379 master - 0 1552265444126 9 connected 0-5460
+
+然后给新主节点分配槽位
+./redis-trib.rb reshard 192.168.56.102:8001
+How many slots do you want to move (from 1 to 16384)? 4000  //分配4000个槽位
+What is the receiving node ID? b54291991a9c6f77274462ff37a78cd6334db670  //输入分配的id
+Please enter all the source node IDs.
+  Type 'all' to use all the nodes as source nodes for the hash slots.
+  Type 'done' once you entered all the source nodes IDs.
+Source node #1:all  //从所有主节点分配抽取
+
+添加8007节点./redis-trib.rb add-node 192.168.56.102:8007 192.168.56.102:6379
+redis-cli -c -h 192.168.56.102 -p 8007 进入8007
+输入CLUSTER REPLICATE b54291991a9c6f77274462ff37a78cd6334db670
+						8001的节点id
+						分配8007做8001的从节点
+
+
+./redis-trib.rb check 192.168.56.101:6379 检查集群状态
+--------------------------------------
+
+redis收缩
+修改/usr/local/src/redis/src/redis-trib.rb
+找到move_slot
+while true
+            keys = source.r.cluster("getkeysinslot",slot,o[:pipeline])
+            break if keys.length == 0
+            begin
+                source.r.client.call(["migrate",target.info[:host],target.info[:port],"",0,@timeout,"replace",:keys,*keys])  //要替换
+				STDOUT.flush
+            rescue => e
+                if o[:fix] && e.to_s =~ /BUSYKEY/
+                    xputs "*** Target key exists. Replacing it for FIX."
+                    source.r.client.call(["migrate",target.info[:host],target.info[:port],"",0,@timeout,:replace,:keys,*keys])  //要替换
+                else
+                    puts ""
+                    xputs "[ERR] Calling MIGRATE: #{e}"
+                    exit 1
+                end
+            end
+
+替换成
+
+source.r.call(["migrate",target.info[:host],target.info[:port],"",0,@timeout,"replace",:keys,*keys])
+  source.r.call(["migrate",target.info[:host],target.info[:port],"",0,@timeout,:replace,:keys,*keys])
+-------------------------
+这是由于ruby 和 redis gem版本不对应问题
+https://blog.csdn.net/m0_37128231/article/details/80755478
+
+删除8007从节点
+
+98ea450d82190aa8af16928c76baf4c5ccab6f9d 192.168.56.105:6379 slave 30b41d8a01ece0e0771a1e488f8eeba73a341b19 0 1552268003333 14 connected
+30b41d8a01ece0e0771a1e488f8eeba73a341b19 192.168.56.102:6379 master - 0 1552268003837 14 connected 6795-10922
+7d840c73f97040f64ff7379d9f662e80cfe3786b 192.168.56.101:7001 myself,slave b539dc70eecad953474e9893c0413496091d8931 0 0 7 connected
+ddcb5c850180ef07555f46cc6e45c6d17aed6c2a 192.168.56.104:6379 master - 0 1552268003837 9 connected 1333-5460
+b539dc70eecad953474e9893c0413496091d8931 192.168.56.103:6379 master - 0 1552268002827 8 connected 12182-16383
+79c72857431b4f9ca12ff5a1ade43500d8d4b8f7 192.168.56.102:8007 slave b54291991a9c6f77274462ff37a78cd6334db670 0 1552268003333 15 connected
+f0898fe0ae3b813e547f2548d552e430a97d37a5 192.168.56.101:7000 slave ddcb5c850180ef07555f46cc6e45c6d17aed6c2a 0 1552268004341 9 connected
+b54291991a9c6f77274462ff37a78cd6334db670 192.168.56.102:8001 master - 0 1552268002322 15 connected 0-1332 5461-6794 10923-12181
+
+./redis-trib.rb del-node 192.168.56.102:6379 79c72857431b4f9ca12ff5a1ade43500d8d4b8f7
+							对一个master节点 忘记8007节点。 8007节点id
+							对6379节点做忘记下线节点的操作，那么经过一段时间，集群中的其他节点也都会忘记。
+将8001主节点上的数据全部从新分配
+ ./redis-trib.rb reshard 192.168.56.102:8001
+ How many slots do you want to move (from 1 to 16384)? 3926 //要移动的个数12181 - 10923 + 1 = 1259  6794 - 5461 + 1 = 1334 1332 +1 = 1333
+What is the receiving node ID? 30b41d8a01ece0e0771a1e488f8eeba73a341b19  //移动到102:6379上 master
+Please enter all the source node IDs.
+  Type 'all' to use all the nodes as source nodes for the hash slots.
+  Type 'done' once you entered all the source nodes IDs.
+Source node #1:45ad068248b2cac5d381759afe89de82dca25995  //数据源id是8001的id b54291991a9c6f77274462ff37a78cd6334db670
+Source node #2:done  //写done
+
+./redis-trib.rb del-node 192.168.56.102:6379 b54291991a9c6f77274462ff37a78cd6334db670
+													8001节点id
+redis客户端解决中文乱码问题  在redis-cli后加 --raw
+-----------------------------------------------------------------------------------------------------------
+
+Spark On Yarn
+启动yarn
+start-yarn.sh 
+再另外一台机器上
+yarn-daemon.sh start resourcemanager
+
+设置HADOOP_CONF_DIR=/usr/local/hadoop-2.8.5/etc/hadoop环境变量
+
+----------------------------
+
+cluster模式运行
+bin/spark-submit --class org.apache.spark.examples.SparkPi  --master yarn --deploy-mode cluster --driver-memory 1g --executor-memory 1g --executor-cores 2 --queue default examples/jars/spark-examples_2.11-2.4.0.jar 10000
+
+yarn的ApplicationMaster会充当Driver的角色，如果挂掉，yarn会重启一个，sparkSubmit只是提交一下任务
+看结果到yarn的管理界面application的logs里去看
+
+----------------------------
+
+client模式运行
+bin/spark-shell --master yarn --deploy-mode client --driver-memory 1g --executor-memory 1g --executor-cores 2 --queue default 
+
+spark-submit提交程序到yarn，yarn启动ApplicationMaster（其实就是ExecutorLauncher进程）申请资源，spark executor启动后直接连接spark-submit相当于Driver
+
+-----------------
+如果想让yarn运行client模式需要在所有yarn节点的yarn-site.xml文件中添加
+<property>
+    <name>yarn.nodemanager.pmem-check-enabled</name>
+    <value>false</value>
+</property>
+
+<property>
+    <name>yarn.nodemanager.vmem-check-enabled</name>
+    <value>false</value>
+</property>
+解除内存检查
+
+------------------------------------------------------------------------------------------------------------------
+
+如何优雅的停止sparkstreaming on yarn
+在Dirvier程序中写
+var stopFlag:Boolean = false
+val shutdownMarker = "hdfs://hdp12/tmp/shutdownmarker"
+
+def main(args: Array[String]): Unit = {
+	...
+	streamingContext.start()
+
+    val checkIntervalMillis = 10000
+    var isStopped = false
+
+
+    while (! isStopped) {
+      println("calling awaitTerminationOrTimeout")
+      isStopped = streamingContext.awaitTerminationOrTimeout(checkIntervalMillis)
+      if (isStopped)
+        println("confirmed! The streaming context is stopped. Exiting application...")
+      else
+        println("Streaming App is still running. Timeout...")
+      checkShutdownMarker
+      if (!isStopped && stopFlag) {
+        println("stopping ssc right now")
+        streamingContext.stop(true, true)
+        println("ssc is stopped!!!!!!!")
+      }
+    }
+}
+
+def checkShutdownMarker = {
+    if (!stopFlag) {
+      val fs = FileSystem.get(new Configuration())
+      stopFlag = fs.exists(new Path(shutdownMarker))
+    }
+
+ }
+
+原理就是不断检查hdfs中的标记文件，如果文件存在，就停止
+
+To shutdown the streaming app gracefully, place a file named "shutdownmarker" to HDFS /tmp folder
+hdfs dfs -put shutdownmarker /tmp/shutdownmarker
+
+https://github.com/lanjiang/streamingstopgraceful
+
+----------------------------------------------------------------------------------------------------------------
+
+mongodb是一个NoSQL数据库，里面存储的是json（bson），支持集群，高可用，可扩展
+mongodb中的一些概念
+	MongoDB            MySQL
+	database          database
+	collection        table
+	json              二维表
+	不支持SQL          SQL
+	_id               主键
+	支持建索引         支持建索引
+
+---------------------------------------------------------------------------------------------------------------
+
+安装mongodb单机版
+Create a /etc/yum.repos.d/mongodb-org-4.0.repo file so that you can install MongoDB directly using yum:
+[mongodb-org-4.0]
+name=MongoDB Repository
+baseurl=https://repo.mongodb.org/yum/redhat/$releasever/mongodb-org/4.0/x86_64/
+gpgcheck=1
+enabled=1
+gpgkey=https://www.mongodb.org/static/pgp/server-4.0.asc
+--------------------------
+sudo yum install -y mongodb-org
+--------------------------
+mkdir -p /var/lib/mongo
+mkdir -p /var/log/mongodb
+--------------------------
+systemctl start mongod
+systemctl stop mongod
+--------------------------
+vi /etc/mongod.conf
+
+bindIp: 192.168.56.103
+security.authorization: enabled
+--------------------------
+
+use admin
+db.createUser(
+  {
+    user: "myUserAdmin",
+    pwd: "abc123",
+    roles: [ { role: "userAdminAnyDatabase", db: "admin" }, "readWriteAnyDatabase" ]
+  }
+)
+
+---------------------------
+
+mongo --host 192.168.56.103 -u "admin" -p "az63091919" --authenticationDatabase "admin"
+
+-------------------------------------------------------------------------------------------------------------
+
+创建数据库
+use mydb
+mongodb创建表
+db.createCollection("users")
+删除表
+db.bike.drop()
+
+查询索引
+db.inventory.getIndexes()
+删除索引
+db.inventory.dropIndex({"item":-1})
+
+-------------------------------------------------------------------------------------------------------------
+
+mongodb集群安装
+卸载用rpm安装的mongodb
+rpm -qa | grep mongo
+rpm -e --nodeps 要卸载的软件包
+
+rm -rf /var/lib/mongo
+rm -rf /var/log/mongodb
+
+rm -rf /etc/yum.repos.d/mongodb-org-4.0.repo 
+yum clean all
+
+关闭sellinux
+vi /etc/selinux/config
+将SELINUX=enforcing改为SELINUX=disabled 
+reboot重启
+查看sellinux状态 getenforce 应该显示Disabled
+
+yum install libcurl openssl
+tar -zxvf mongodb-linux-*-4.0.6.tgz
+mv mongodb-linux-x86_64-rhel70-4.0.6/ mongodb
+vi /etc/profile
+添加
+MONGODB_HOME=/usr/local/mongodb
+PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin:$HADOOP_HOME/sbin:$MONGODB_HOME/bin
+export JAVA_HOME HADOOP_HOME HADOOP_CONF_DIR MONGODB_HOME PATH
+
+source /etc/profile
+
+创建config服务器
+mkdir -p /usr/local/mongo/config
+vi mongod.conf 
+
+# mongod.conf
+
+# for documentation of all options, see:
+#   http://docs.mongodb.org/manual/reference/configuration-options/
+
+# where to write logging data.
+systemLog:
+  destination: file
+  logAppend: true
+  path: /usr/local/mongo/config/log/mongod.log
+
+# Where and how to store data.
+storage:
+  dbPath: /usr/local/mongo/config/data
+  journal:
+    enabled: true
+#  engine:
+#  mmapv1:
+#  wiredTiger:
+
+# how the process runs
+processManagement:
+  fork: true  # fork and run in background
+  pidFilePath: /usr/local/mongo/config/run/mongod.pid  # location of pidfile
+  timeZoneInfo: /usr/share/zoneinfo
+
+# network interfaces
+net:
+  port: 27019
+  bindIp: 192.168.56.102  # Enter 0.0.0.0,:: to bind to all IPv4 and IPv6 addresses or, alternatively, use the net.bindIpAll setting.
+
+
+#security:
+
+#operationProfiling:
+
+replication:
+  replSetName: configs
+
+sharding:
+  clusterRole: configsvr
+
+## Enterprise-Only Options
+
+#auditLog:
+
+#snmp:
+
+然后执行mongod -f /usr/local/mongo/config/mongod.conf启动config服务器
+进入mongo客户端  mongo --host 192.168.56.101 --port 27019
+输入
+config = {
+    _id : "configs",
+     members : [
+         {_id : 0, host : "192.168.56.101:27019" },
+         {_id : 1, host : "192.168.56.102:27019" },
+         {_id : 2, host : "192.168.56.103:27019" }
+     ]
+ }
+初始化
+rs.initiate(config)
+查看
+rs.status
+
+
+创建分片
+mkdir -p /mongo/shard1/{log,data,run}
+cat >> /mongo/shard1/mongod.conf << EOF
+systemLog:
+  destination: file
+  logAppend: true
+  path: /mongo/shard1/log/mongod.log
+storage:
+  dbPath: /mongo/shard1/data
+  journal:
+    enabled: true
+processManagement:
+  fork: true
+  pidFilePath: /mongo/shard1/run/mongod.pid
+net:
+  port: 27018
+replication:
+  replSetName: shard1
+sharding:
+  clusterRole: shardsvr
+EOF
+
+启动所有shard1 server
+登陆任意一台shard1服务器(希望哪一台机器是主，就登录到那一台机器上)，初始化副本集
+use admin
+config = {
+   _id : "shard1",
+    members : [
+        {_id : 0, host : "192.168.56.101:27018" },
+        {_id : 1, host : "192.168.56.102:27018" },
+        {_id : 2, host : "192.168.56.103:27018" }
+    ]
+}
+rs.initiate(config)
+
+按照同样方法创建shard2、shard3
+
+创建mongos
+mkdir /usr/local/mongo/mongos
+vi mongod.conf
+# mongod.conf
+
+# for documentation of all options, see:
+#   http://docs.mongodb.org/manual/reference/configuration-options/
+
+# where to write logging data.
+systemLog:
+  destination: file
+  logAppend: true
+  path: /usr/local/mongo/mongos/log/mongod.log
+
+# Where and how to store data.
+#storage:
+#  dbPath: /usr/local/mongo/shard1/data
+#  journal:
+#    enabled: true
+#  engine:
+#  mmapv1:
+#  wiredTiger:
+
+# how the process runs
+processManagement:
+  fork: true  # fork and run in background
+  pidFilePath: /usr/local/mongo/mongos/run/mongod.pid  # location of pidfile
+  timeZoneInfo: /usr/share/zoneinfo
+
+# network interfaces
+net:
+  port: 27017
+  bindIp: 192.168.56.102  # Enter 0.0.0.0,:: to bind to all IPv4 and IPv6 addresses or, alternatively, use the net.bindIpAll setting.
+
+
+#security:
+
+#operationProfiling:
+
+#replication:
+
+sharding:
+  configDB: configs/192.168.56.101:27019,192.168.56.102:27019,192.168.56.103:27019
+## Enterprise-Only Options
+
+#auditLog:
+
+#snmp:
+
+mkdir -p /usr/local/mongo/mongos/{log,run}
+用mongos命令启动mongos
+mongos -f /usr/local/mongo/mongos/mongod.conf
+
+登陆任意一台mongos
+sh.addShard("shard1/192.168.56.101:27018,192.168.56.102:27018,192.168.56.103:27018")
+sh.addShard("shard2/192.168.56.101:27020,192.168.56.102:27020,192.168.56.103:27020")
+sh.addShard("shard3/192.168.56.101:27021,192.168.56.102:27021,192.168.56.103:27021")
+rs.slaveOk()
+
+
+然后可以使用了
+use mobike
+use admin
+把mobike数据库加入分片
+db.runCommand({"enablesharding":"mobike"})
+use mobike
+db.createCollection("bikes")
+use admin
+按数据集bikes按照_id进行hash分片
+db.runCommand({"shardcollection":"mobike.bikes","key":{_id:"hashed"}})
+
+进入shard1的从节点要执行rs.slaveOk(),从节点才可以读,默认从节点不能读
+
+mongodb集群设置用户名密码
+openssl rand -base64 756 > /usr/local/mongodb/keyFile.file
+chmod 400 /usr/local/mongodb/keyFile.file
+第一条命令是生成密钥文件，第二条命令是使用chmod更改文件权限，为文件所有者提供读权限
+将keyFile传到另外两台机器上
+
+随便进入一台mongos
+use admin
+db.createUser(
+    {
+        user:"admin",
+        pwd:"az63091919",
+        roles:[{role:"root",db:"admin"}]
+    }
+)
+进入shard的主机
+admin.createUser(
+  {
+    user: "shard1",
+    pwd: "az63091919",
+    roles: [ { role: "userAdminAnyDatabase", db: "admin" } ]
+  }
+)
+shard2和shard3也这样执行
+
+依次对每台机器执行
+killall mongod
+killall mongos
+
+修改configserver和shard的配置文件
+添加
+security:
+  keyFile: /usr/local/mongodb/keyFile.file
+  authorization: enabled
+修改mongos server的配置文件
+添加
+security:
+  keyFile: /usr/local/mongodb/keyFile.file
+
+重启集群
+mongod -f /usr/local/mongodb/conf/config.conf
+mongod -f /usr/local/mongodb/conf/shard1.conf
+mongod -f /usr/local/mongodb/conf/shard2.conf
+mongod -f /usr/local/mongodb/conf/shard3.conf
+mongos -f /usr/local/mongodb/conf/mongos.conf
+
+进入mongos
+use admin
+db.auth("admin","az63091919")
+就可以使用数据库了
+
+进入shard1
+db.getSiblingDB("admin").auth("shard1", "az63091919" )
+创建可以读分片数据的用户
+db.getSiblingDB("admin").createUser(
+  {
+    "user" : "shard1user",
+    "pwd" : "az63091919",
+    roles: [ { "role" : "readWriteAnyDatabase", "db" : "admin" } ]
+  }
+)
+读分片数据就用shard1user这个用户auth
+db.getSiblingDB("admin").auth("shard1user", "az63091919" )
+
+　　readAnyDatabase：任何数据库的只读权限(和read相似)
+
+　　readWriteAnyDatabase：任何数据库的读写权限(和readWrite相似)
+
+　　userAdminAnyDatabase：任何数据库用户的管理权限(和userAdmin相似)
+
+　　dbAdminAnyDatabase：任何数据库的管理权限(dbAdmin相似)
+
+　　__system：  什么权限都有
+
+db.grantRolesToUser( "admin" , [ { role: "clusterAdmin", db: "admin" }])
+-------------------------------------------------------------------------------------------------------------
+
+pv: PageView所有页面的访问次数（哪些页面访问的次数多，按从高到低进行排序）
+uv: UniqueView 独立访问用户
+
+将这些用户访问log记录到mongo中，然后用spark分析
+
+在页面中埋点（将用户重要的行为记录下来）
+将用户的行为数据存储到后台
+
+-------------------------------------------------------------------------------------------------------------
+
+安装nginx单机版
+sbin/nginx  启动
+sbin/nginx -s stop   停止
+
+1.上传nginx安装包
+2.解压nginx
+	tar -zxvf nginx-1.12.2.tar.gz -C /usr/local/src/
+3.进入到nginx的源码目录
+	cd /usr/local/src/nginx-1.12.2/
+4.预编译
+	./configure
+5.安静gcc编译器
+	yum -y install gcc pcre-devel openssl openssl-devel
+6.然后再执行
+	./configure
+7.编译安装nginx
+	make && make install
+8.启动nginx
+	sbin/nginx
+9.查看nginx进程
+	ps -ef | grep nginx
+	netstat -anpt | grep nginx
+
+--------------------------------
+
+springboot程序打包，如果用的是jsp技术的话，要改成打war包
+<groupId>com.wyd</groupId>
+	<artifactId>bike</artifactId>
+	<version>0.0.1-SNAPSHOT</version>
+	<packaging>war</packaging>
+	<name>bike</name>
+java -jar niubike-0.0.1-SNAPSHOT.war >> ./logs 2>&1 &
+
+-------------------------------
+
+安装带kafka插件的nginx单机
+1.安装git
+	yum install -y git
+2.切换到/usr/local/src目录，然后将kafka的c客户端源码clone到本地
+	cd /usr/local/src
+	git clone https://github.com/edenhill/librdkafka
+3.进入到librdkafka，然后进行编译
+	cd librdkafka
+	yum install -y gcc gcc-c++ pcre-devel zlib-devel
+	./configure
+	make && make install
+
+4.安装nginx整合kafka的插件，进入到/usr/local/src，clone nginx整合kafka的源码
+	cd /usr/local/src
+	git clone https://github.com/brg-liuwei/ngx_kafka_module
+
+5.进入到nginx的源码包目录下	（编译nginx，然后将将插件同时编译）
+	cd /usr/local/src/nginx-1.12.2
+	./configure --add-module=/usr/local/src/ngx_kafka_module/
+	make
+	make install
+6.启动nginx，报错，找不到kafka.so.1的文件
+	error while loading shared libraries: librdkafka.so.1: cannot open shared object file: No such file or directory
+7.加载so库
+	echo "/usr/local/lib" >> /etc/ld.so.conf
+	ldconfig
+
+8. vi nginx/conf/nignx.conf
+添加
+	#gzip on
+	kafka;
+    kafka_broker_list node2:9092 node3:9092 node4:9092;
+    server {
+        listen       80;
+        server_name  localhost;
+
+        #charset koi8-r;
+
+        #access_log  logs/host.access.log  main;
+
+        location /kafka/track {
+           kafka_topic track;
+        }
+        location /kafka/user {
+           kafka_topic user;
+        }
+    }
+
+---------------------------------------------------------------------------------------------------------------------
+
+flume和logstash都是日志采集工具，flume是用java写的  logstash是用Jruby写的
+为应对不同场景，所以flume定义了很多组件
+source的功能：收集数据，然后将收集的数据搞到channel里
+channel：
+sink：
+为什么搞那么多组件，因为要根据用户需求随意配置，灵活组合
+memory channel好处是快，file channel安全但慢，还有jdbc channel
+为什么要有channel，channel相当于一个缓冲的功能
+
+实时采集，并且保证数据不丢，如果flume所在的机器宕机，重启flume，flume接着原来的数据继续读（继续读）
+
+---------------------------------------------------------------------------------------------------------------------
+
+flume source的生命周期
+先执行构造器，然后执行configure方法，然后执行start方法，processor.process
+1.读取配置文件 （读取哪个文件，编码集、偏移量写到哪个文件，多长时间检测一下文件是否有新内容）
+
+---------------------------------------------------------------------------------------------------------------------
+
+安装flume，解压即可
+创建dir-hdfs.conf文件
+
+写spooldir类型source
+#定义三大组件
+a1.sources = r1
+a1.sinks = k1
+a1.channels = c1
+
+#配置source组件，使用spooldir source
+a1.sources.r1.type = spooldir
+a1.sources.r1.spoolDir = ~/log/spooldir
+a1.sources.r1.channels = c1
+#控制每行读取的字节大小，默认2048
+a1.sources.r1.deserializer.maxLineLength = 10000
+
+#配置sink组件，使用hdfs sink
+a1.sinks.k1.type = hdfs
+a1.sinks.k1.channel = c1
+a1.sinks.k1.hdfs.path = /flume/events/%y-%m-%d/%H%M%S
+a1.sinks.k1.hdfs.filePrefix = events-
+#配置文件切换规则
+a1.sinks.k1.hdfs.rollInterval = 120
+a1.sinks.k1.hdfs.rollSize = 0
+a1.sinks.k1.hdfs.rollCount = 10000
+#配置存储目录切换
+a1.sinks.k1.hdfs.round = true
+a1.sinks.k1.hdfs.roundValue = 10
+a1.sinks.k1.hdfs.roundUnit = minute
+#配置批量写入hdfs
+a1.sinks.k1.hdfs.batchSize = 100
+a1.sinks.k1.hdfs.fileType = DataStream
+a1.sinks.k1.hdfs.writeFormat = Text
+a1.sinks.k1.hdfs.useLocalTimeStamp = true
+
+#配置channel组件，用内存组件
+a1.channels.c1.type = memory
+a1.channels.c1.capacity = 10000
+a1.channels.c1.transactionCapacity = 5000
+a1.channels.c1.byteCapacityBufferPercentage = 20
+a1.channels.c1.byteCapacity = 800000
+
+-----------------------------------------
+
+flume如果要连接hdfs集群，就要把core-sit和hdfs-site复制到flume/conf文件夹下
+
+-----------------------------------------
+
+启动flume
+bin/flume-ng agent --conf conf --conf-file dir-hdfs.conf --name a1 -Dflume.root.logger=INFO,console 
+后台启动flume
+nohup bin/flume-ng agent --conf conf --conf-file dir-hdfs.conf --name a1 1>/dev/null 2>&1 &
+
+-----------------------------------------
+
+写exec类型sources
+#定义三大组件
+a1.sources = r1
+a1.sinks = k1
+a1.channels = c1
+
+#定义sources，使用exec
+a1.sources.r1.type = exec
+a1.sources.r1.command = tail -F /root/log/secure/access.log
+a1.sources.r1.channels = c1
+
+#配置sink组件，使用hdfs sink
+a1.sinks.k1.type = hdfs
+a1.sinks.k1.channel = c1
+a1.sinks.k1.hdfs.path = /flume/events/%y-%m-%d/%H%M%S
+a1.sinks.k1.hdfs.filePrefix = events-
+#配置文件切换规则
+a1.sinks.k1.hdfs.rollInterval = 60
+a1.sinks.k1.hdfs.rollSize = 0
+a1.sinks.k1.hdfs.rollCount = 10000
+#配置存储目录切换
+a1.sinks.k1.hdfs.round = true
+a1.sinks.k1.hdfs.roundValue = 10
+a1.sinks.k1.hdfs.roundUnit = minute
+#配置批量写入hdfs
+a1.sinks.k1.hdfs.batchSize = 20
+a1.sinks.k1.hdfs.fileType = DataStream
+a1.sinks.k1.hdfs.writeFormat = Text
+a1.sinks.k1.hdfs.useLocalTimeStamp = true
+
+#配置channel组件，用内存组件
+a1.channels.c1.type = memory
+a1.channels.c1.capacity = 100
+a1.channels.c1.transactionCapacity = 50
+
+测试
+while true do echo `date` >> access.log sleep 0.5 done
+
+----------------------------------------------------------------------------------------------------------------------
+
+avro：一种通用的跨平台跨语言的序列号协议
+protobuf：google序列号协议
+jdk的serializable
+hadoop的Writable
+
+--------------------------------------------------------------------------------------------------------------------
+
+多级agent串联，定义node1上的agent
+#定义三大组件
+a1.sources = r1
+a1.sinks = k1
+a1.channels = c1
+
+#定义sources，使用exec
+a1.sources.r1.type = exec
+a1.sources.r1.command = tail -F /root/log/secure/access.log
+a1.sources.r1.channels = c1
+
+#使用avro类型的sink，相当于avro客户端
+a1.sinks.k1.type = avro
+a1.sinks.k1.channel = c1
+a1.sinks.k1.hostname = node2
+a1.sinks.k1.port = 4141
+
+#配置channel组件，用内存组件
+a1.channels.c1.type = memory
+a1.channels.c1.capacity = 600
+a1.channels.c1.transactionCapacity = 300
+
+-----------------------
+
+定义node2上的agent
+a1.sources = r1
+a1.sinks = k1
+a1.channels = c1
+
+#定义source，使用avro类型source，相当于服务端
+a1.sources.r1.type = avro
+a1.sources.r1.channels = c1
+a1.sources.r1.bind = node2
+a1.sources.r1.port = 4141
+
+配置sink组件，使用hdfs sink
+a1.sinks.k1.type = hdfs
+a1.sinks.k1.channel = c1
+a1.sinks.k1.hdfs.path = /flume/events/%y-%m-%d/%H%M%S
+a1.sinks.k1.hdfs.filePrefix = events-
+#配置文件切换规则
+a1.sinks.k1.hdfs.rollInterval = 60
+a1.sinks.k1.hdfs.rollSize = 0
+a1.sinks.k1.hdfs.rollCount = 10000
+#配置存储目录切换
+a1.sinks.k1.hdfs.round = true
+a1.sinks.k1.hdfs.roundValue = 10
+a1.sinks.k1.hdfs.roundUnit = minute
+#配置批量写入hdfs
+a1.sinks.k1.hdfs.batchSize = 20
+a1.sinks.k1.hdfs.fileType = DataStream
+a1.sinks.k1.hdfs.writeFormat = Text
+a1.sinks.k1.hdfs.useLocalTimeStamp = true
+
+#配置channel组件，用内存组件
+a1.channels.c1.type = memory
+a1.channels.c1.capacity = 600
+a1.channels.c1.transactionCapacity = 300
+
+-----------------------------------------------------------------------------------------------------------------
+
+自定义source
+查看flumeclloect工程下的com.wyd.flume.source.TailFileSource
+
+将工程打包，然后把jar包放到flume/lib目录下
+bin/flume-ng agent --conf conf --conf-file tail-roll-file-posit.conf --name a1 -Dflume.root.logger=INFO,console
+
+a1.sources = r1
+a1.sinks = k1
+a1.channels = c1
+
+a1.sources.r1.type = com.wyd.flume.source.TailFileSource
+a1.sources.r1.channels = c1
+a1.sources.r1.filePath = /root/log/selfsource/access.log
+a1.sources.r1.posiFile = /root/log/position/posit.log
+
+a1.sinks.k1.type = file_roll
+a1.sinks.k1.channel = c1
+a1.sinks.k1.sink.directory = /root/log/result
+
+a1.channels.c1.type = memory
+a1.channels.c1.capacity = 100
+a1.channels.c1.transactionCapacity = 50
+
+-----------------------------------------------------------------------------------------------------------------
+
+kafka channel使用，往kafka里写
+
+a1.sources = r1
+a1.channels = c1
+
+#定义sources，使用exec
+a1.sources.r1.type = exec
+a1.sources.r1.command = tail -F /root/log/secure/access.log
+a1.sources.r1.channels = c1
+
+a1.channels.c1.type = org.apache.flume.channel.kafka.KafkaChannel
+a1.channels.c1.kafka.bootstrap.servers = node2:9092,node3:9092,node4:9092
+a1.channels.c1.kafka.topic = c1
+a1.channels.c1.kafka.consumer.group.id = flume-consumer
+#写入kafka里的数据是文本而不是flume的event
+a1.channels.c1.parseAsFlumeEvent = false
+
+-------------------------------------------------------------------------------------------------------------------
+自定义interceptor，
+实现org.apache.flume.interceptor.Interceptor接口
+参照SearchAndReplaceInterceptor写
+将程序打包上传到flume的lib目录下
+interceptor只能跟在source后面
+
+a1.sources = r1
+a1.channels = c1
+
+#定义sources，使用exec
+a1.sources.r1.type = exec
+a1.sources.r1.command = tail -F /root/log/interceptortest/access.log
+a1.sources.r1.channels = c1
+a1.sources.r1.interceptors = i1
+a1.sources.r1.interceptors.i1.type = com.wyd.flume.interceptor.JsonInterceptor$JsonBuilder
+a1.sources.r1.interceptors.i1.fields = id,name,age,fv
+a1.sources.r1.interceptors.i1.separator = ,
+
+a1.channels.c1.type = org.apache.flume.channel.kafka.KafkaChannel
+a1.channels.c1.kafka.bootstrap.servers = node2:9092,node3:9092,node4:9092
+a1.channels.c1.kafka.topic = c1
+#写入kafka里的数据是文本而不是flume的event
+a1.channels.c1.parseAsFlumeEvent = false
+
+----------------------------------------------------------------------------------------------------------------------
+
+使用taildirsource
+a1.sources = r1
+a1.sinks = k1
+a1.channels = c1
+
+a1.sources.r1.type = TAILDIR
+a1.sources.r1.channels = c1
+a1.sources.r1.positionFile = ./taildir_position.json
+a1.sources.r1.filegroups = f1
+a1.sources.r1.filegroups.f1 = /root/log/tailfile/.*.log
+a1.sources.r1.fileHeader = false
+a1.sources.r1.interceptors = i1
+a1.sources.r1.interceptors.i1.type = com.wyd.flume.interceptor.JsonInterceptor$JsonBuilder
+a1.sources.r1.interceptors.i1.fields = id,name,age,fv
+a1.sources.r1.interceptors.i1.separator = ,
+
+a1.channels.c1.type = org.apache.flume.channel.kafka.KafkaChannel
+a1.channels.c1.kafka.bootstrap.servers = node2:9092,node3:9092,node4:9092
+a1.channels.c1.kafka.topic = tail1
+a1.channels.c1.parseAsFlumeEvent = false
+
+配置sink组件，使用hdfs sink
+a1.sinks.k1.type = hdfs
+a1.sinks.k1.channel = c1
+a1.sinks.k1.hdfs.path = /flume/events/%y-%m-%d/%H%M%S
+a1.sinks.k1.hdfs.filePrefix = events-
+#配置文件切换规则
+a1.sinks.k1.hdfs.rollInterval = 0
+a1.sinks.k1.hdfs.rollSize = 0
+a1.sinks.k1.hdfs.rollCount = 10
+#配置存储目录切换
+a1.sinks.k1.hdfs.round = true
+a1.sinks.k1.hdfs.roundValue = 10
+a1.sinks.k1.hdfs.roundUnit = minute
+#配置批量写入hdfs
+a1.sinks.k1.hdfs.batchSize = 10
+a1.sinks.k1.hdfs.fileType = DataStream
+a1.sinks.k1.hdfs.writeFormat = Text
+a1.sinks.k1.hdfs.useLocalTimeStamp = true
+
+能实现多级目录监测的taildir
+
+https://github.com/qwurey/flume-source-taildir-recursive
+
+---------------------------------------------------------------------------------------------------------------------
+
+从kafka读数据存到hdfs中
+a1.sinks = k1
+a1.channels = c1
+
+a1.channels.c1.type = org.apache.flume.channel.kafka.KafkaChannel
+a1.channels.c1.kafka.bootstrap.servers = node2:9092,node3:9092,node4:9092
+a1.channels.c1.kafka.topic = recharge
+a1.channels.channel1.kafka.consumer.group.id = recharge-consumer
+a1.channels.c1.parseAsFlumeEvent = false
+
+配置sink组件，使用hdfs sink
+a1.sinks.k1.type = hdfs
+a1.sinks.k1.channel = c1
+a1.sinks.k1.hdfs.path = /flume/mobike/recharge/%y-%m-%d/%H%M%S
+a1.sinks.k1.hdfs.filePrefix = events-
+#配置文件切换规则
+a1.sinks.k1.hdfs.rollInterval = 0
+a1.sinks.k1.hdfs.rollSize = 262144000
+a1.sinks.k1.hdfs.rollCount = 0
+#配置存储目录切换
+a1.sinks.k1.hdfs.round = true
+a1.sinks.k1.hdfs.roundValue = 10
+a1.sinks.k1.hdfs.roundUnit = minute
+#配置批量写入hdfs
+a1.sinks.k1.hdfs.batchSize = 10
+a1.sinks.k1.hdfs.fileType = DataStream
+a1.sinks.k1.hdfs.writeFormat = Text
+a1.sinks.k1.hdfs.useLocalTimeStamp = true
+
+---------------------------------------------------------------------------------------------------------------------
+spring data的mongodb注解
+@Document(collection = "users")  //这个类映射到Mongo中的users集合
+public class User
+
+@Id //主键
+private String id
+@Indexed(unique = true)  //这个字段创建索引，并且唯一
+private String phoneNum
+@Transient  //这个字段在数据库中不存储
+private String verifyCode
+//地理位置字段，里面保存着经纬度 geohash索引
+@GeoSpatialIndexed(type = GeoSpatialIndexType.GEO_2DSPHERE)
+
+----------------------------------------------------------------------------------------------------------------
+
+mongo geohash 2dsphere要求数据经度在前，纬度在后
+location: [longitude,latitude]
+否则报错
+Can't extract geo keys
+
+----------------------------------------------------------------------------------------------------------------
+
+Structured Streaming详解
+https://blog.csdn.net/l_15156024189/article/details/81612860
+Spark Structured Streaming + Kafka
+https://blog.csdn.net/asd136912/article/details/82913264
+
+---------------------------------------------------------------------------------------------------------------
+
+在spark streaming中使用sparksql
+package com.sid.spark
+ 
+import org.apache.spark.SparkConf
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.streaming.{Seconds, StreamingContext, Time}
+ 
+/**
+  * Use DataFrames and SQL to count words in UTF8 encoded, '\n' delimited text received from the
+  * network every second.
+  *
+  * Usage: SqlNetworkWordCount <hostname> <port>
+  * <hostname> and <port> describe the TCP server that Spark Streaming would connect to receive data.
+  *
+  * To run this on your local machine, you need to first run a Netcat server
+  *    `$ nc -lk 9999`
+  * and then run the example
+  *    `$ bin/run-example org.apache.spark.examples.streaming.SqlNetworkWordCount localhost 9999`
+  *
+  *    Spark Streaming整合Spark SQL完成词频统计
+  */
+ 
+object SqlNetworkWordCount {
+  def main(args: Array[String]) {
+ 
+    val sparkConf = new SparkConf().setMaster("local[2]").setAppName("SocketWordCount")
+    val ssc = new StreamingContext(sparkConf, Seconds(5))
+ 
+    // Create a socket stream on target ip:port and count the
+    // words in input stream of \n delimited text (eg. generated by 'nc')
+    // Note that no duplication in storage level only for running locally.
+    // Replication necessary in distributed scenario for fault tolerance.
+    val lines = ssc.socketTextStream("node1", 6789)
+    val words = lines.flatMap(_.split(" "))
+ 
+    // Convert RDDs of the words DStream to DataFrame and run SQL query
+    words.foreachRDD { (rdd: RDD[String], time: Time) =>
+      // Get the singleton instance of SparkSession
+      val spark = SparkSessionSingleton.getInstance(rdd.sparkContext.getConf)
+      import spark.implicits._
+ 
+      // Convert RDD[String] to RDD[case class] to DataFrame
+      val wordsDataFrame = rdd.map(w => Record(w)).toDF()
+ 
+      // Creates a temporary view using the DataFrame
+      wordsDataFrame.createOrReplaceTempView("words")
+ 
+      // Do word count on table using SQL and print it
+      val wordCountsDataFrame =
+        spark.sql("select word, count(*) as total from words group by word")
+      println(s"========= $time =========")
+      wordCountsDataFrame.show()
+    }
+ 
+    ssc.start()
+    ssc.awaitTermination()
+  }
+ 
+  /** Case class for converting RDD to DataFrame */
+  case class Record(word: String)
+ 
+ 
+  /** Lazily instantiated singleton instance of SparkSession */
+  object SparkSessionSingleton {
+ 
+    @transient  private var instance: SparkSession = _
+    def getInstance(sparkConf: SparkConf): SparkSession = {
+      if (instance == null) {
+        instance = SparkSession
+          .builder
+          .config(sparkConf)
+          .getOrCreate()
+      }
+      instance
+    }
+  }
+}
+
+------------------------------------------------------------------------------------------------------------------
+
+分布式内存：内存对齐
+
+吴恩达机器学习 https://study.163.com/course/introduction/1004570029.htm
+
+-----------------------------------------------------------------------------------
+
+RDD内部包含的5个主要的属性
+1、包含分区列表
+2、包含一个针对每个split的计算函数
+3、对其他RDD的依赖列表
+4、可选，如果是KeyValueRDD的话，可以带分区类
+5、可选，首选块位置列表
+
+---------------------------------------------------------------------------
+
+spark解决数据倾斜
+
+设置随机分区
+
+---------------------------------------------------------------------------------
+
+Spark核心API
+-----------------
+	[SparkContext]
+		连接到spark集群,入口点.
+
+	[HadoopRDD]
+		读取hadoop上的数据，
+
+	[MapPartitionsRDD]
+		针对父RDD的每个分区提供了函数构成的新类型RDD.
+
+	[PairRDDFunctions]
+		对偶RDD函数类。
+		可用于KV类型RDD的附加函数。可以通过隐式转化得到.
+
+	[ShuffleRDD]
+		从Shuffle中计算结果的RDD.
+
+	[RDD]
+		是分区的集合.
+		弹性分布式数据集.
+		不可变的数据分区集合.
+		基本操作(map filter , persist)
+		分区列表					//数据
+		应用给每个切片的计算函数	//行为
+		到其他RDD的依赖列表			//依赖关系
+		(可选)针对kv类型RDD的分区类
+		(可选)首选位置列表
+	
+	[DAGScheduler]
+		高级调度器层面，实现按照阶段(stage),shuffle按照.
+		对每个JOB的各阶段计算有向无环图(DAG)，并且跟踪RDD和每个阶段的输出。
+		找出最小调度运行作业,将Stage对象以TaskSet方式提交给底层的调度器。
+		底层调度器实现TaskScheduler,进而在cluster上运行job.
+		TaskSet已经包含了全部的单独的task，这些Task都能够基于cluster的数据进行
+		正确运行。
+
+		Stage通过在需要shuffle的边界处将RDD打碎来创建Stage对象。
+		具有'窄依赖'的RDD操作(比如map /filter)被管道化至一个taskset中.
+		而具有shuffle依赖的操作则包含多个Stage(一个进行输出，另一个进行输入)
+		最会，每个stage都有一个针对其他stage的shuffle依赖，可以计算多个操作。
+	
+		Dag调度器检测首选位置来运行rask，通过基于当前的缓存状态，并传递给底层的
+		task调度器来实现。根据shuffle的输出是否丢失处理故障问题。
+
+		不是由stage内因为丢失文件引发的故障有task调度处理。在取消整个stage之前，
+		task会进行少量次数的重试操作。
+
+		为了容错，同一stage可能会运行多次，称之为"attemp",如果task调度器报告了一个故障(该
+		故障是由于上一个stage丢失输出文件而导致的)DAG调度就会重新提交丢失的stage。这个通过
+		具有 FetchFailed的CompletionEvent对象或者ExecutorLost进行检测的。
+		DAG调度器会等待一段时间看其他节点或task是否失败，然后对丢失的stage重新提交taskset，
+		计算丢失的task。
+
+
+		术语介绍
+		[job]
+			提交给调度的顶层的工作项目，由ActiveJob表示。
+			是Stage集合。
+
+		[Stage]
+			是task的集合，计算job中的中间结果。同一RDD的每个分区都会应用相同的计算函数。
+			在shuffle的边界处进行隔离(因此引入了隔断，需要上一个stage完成后，才能得到output结果)
+			有两种类型的stage:1)ResultStage，用于执行action动作的最终stage。2)ShuffleMapStage,
+			对shuffle进行输出文件的写操作的。如果job重用了同一个rdd的话，stage通常可以跨越多个
+			job实现共享。
+
+			并行任务的集合，都会计算同一函数。所有task有着同样的shuffle依赖，调度器运行的task DAG
+			在shuffle边界处划分成不同阶段。调度器以拓扑顺序执行.
+
+			每个stage可以shuffleMapStage,该阶段下输出是下一个stage的输入，也可以是resultStage,该阶段
+			task直接执行spark action。对于shuffleMapStage，需要跟踪每个输出分区所在的节点。
+
+			每个stage都有FirstJobId,区分于首次提交的id
+			
+			[ShuffleMapStage]
+				产生输出数据，在每次shuffle之前发生。内部含有shuffleDep字段,有相关字段记录产生多少输出
+				以及多少输出可用。
+				DAGScheduler.submitMapStage()方法可以单独提交ubmitMapStage().
+
+			[ResultStage]
+				该阶段在RDD的一些分区中应用函数来计算Action的结果。有些stage并不会在所有分区上执行。
+				例如first(),lookup();
+
+		[Task]
+			单独的工作单元，每个发送给一台主机。
+
+		[Cache tracking]
+			Dag调度器找出哪些RDD被缓存，避免不必要的重复计算，同时，也会记住哪些shuffleMap已经输出了
+			结果，避免map端shuffle的重复处理。
+
+		[Preferred locations]
+			dag调度器根据rdd的中首选位置属性计算task在哪里运行。
+
+		[Cleanup]
+			运行的job如果完成就会清楚数据结构避免内存泄漏，主要是针对耗时应用。
+
+		
+		[ActiveJob]
+			在Dag调度器中运行job。作业分为两种类型，1)result job，计算ResultStage来执行action.
+			2)map-state job,为shuffleMapState结算计算输出结果以供下游stage使用。
+			主要使用finalStage字段进行类型划分。
+
+			job只跟踪客户端提交的"leaf" stage，通过调用Dag调度器的submitjob或者submitMapStage()方法实现.
+			job类型引发之前stage的执行，而且多个job可以共享之前的stage。这些依赖关系由DAG调度器内部管理。
+
+		[LiveListenerBus]
+			异步传输spark监听事件到监听器事件集合中。
+
+		[EventLoop]
+			从caller接受事件，在单独的事件线程中处理所有事件，该类的唯一子类是DAGSchedulerEventProcessLoop。
+
+		[LiveListenerBus]
+			监听器总线，存放Spark监听器事件的队列。用于监控。
+		
+		[OutputCommitCoordinator]
+			输出提交协调器.决定提交的输出是否进入hdfs。
+
+		
+		[TaskScheduler]
+			底层的调度器，唯一实现TaskSchedulerImpl。可插拔，同Dag调度器接受task，发送给cluster，
+			运行任务，失败重试，返回事件给DAG调度器。
+		
+		[TaskSchedulerImpl]
+			TaskScheduler调度器的唯一实现，通过BackendScheduler(后台调度器)实现各种类型集群的任务调度。
+		
+
+		[SchedulerBackend]
+			可插拔的后台调度系统，本地调度，mesos调度，。。。
+			在任务调度器下方，
+			实现有三种
+			1.LocalSchedulerBackend
+				本地后台调度器
+				调用reviveOffers发送task
+
+				LocalEndpoint调用receive接收task
+					收到后在方法中调用Executor.launchTask
+						new TaskRunner
+							run
+								ResultTask或ShuffleMapTask的runTask
+										runTask的writer方法最终执行我们自己写的函数
+						threadPool.execute(tr)
+
+				LocalEndpoint在LocalSchedulerBackend的start方法中初始化
+				启动task.
+
+			
+			2.StandaloneSchedulerBackend
+				独立后台调度器
+
+			3.CoarseGrainedSchedulerBackend
+				粗粒度后台调度器
+
+		[Executor]
+			spark程序执行者，通过线程池执行任务。
+
+--------------------------------------------------------------------------------------------
+
+sparkstandlone设置调度
+vi spark/conf/fairscheduler.xml
+
+FAIR是公平调度器，配置于生产环境
+FIFO是先进先出调度器，配置于测试环境
+
+---------------------------------------------------------------------------------------------
+
+核心类
+	Stage子类
+		ShuffledMapStage
+		ResultStage
+	Task
+		ResultTask
+		ShuffleMapTask
+	Dependency
+		NarrowDependency
+			OneToOneDependency
+			PruneDependency
+			RangeDependency
+		
+		ShuffleDependency
+
+----------------------------------------------------------------------------------------
+
+spark启动模式
+local[3,2] //三个cpu，2次最大重试次数
+	LocalSchedulerBackend
+
+local-cluster[4,2,1024]   //4个cpu，2次最大重试次数，内存用量
+				0和1相当，都只执行1次
+				2是最多执行两次
+	StandaloneSchedulerBackend
+
+spark://node1:7077   //连接到spark集群上
+	StandaloneSchedulerBackend
+
+local-cluster相当于伪分布式
+
+--------------------------------------------------------------------------------------------
+
+cache()是persist()一种，持久化到内存中
+cache是可容错的，当节点中节点挂掉了，cache会自动重新计算，再在别的节点存
+如果rdd的任何一个分区丢失了，都可以通过变换进行重新计算
+
+persist可以使用不同的存储级别进行持久化
+
+rdd.unpersist 删除持久化的数据
+
+----------------------------------------------------------------------------------------------
+
+广播变量创建后不可变
+
+---------------------------
+
+spark累加器
+
+val accm = sc.longAccumulator("My Accumulator")
+sc.paralleize(Array(1,2,3,4)).foreach(x => accum.add(x))
+accum.value = 10
+
+在webui的task项里看
+
+自定义累加器，继承AccumulatorV2
+
+-------------------------------------------------
+
+df.map(_.getAs[Int]("age")).reduce(_+_)
+
+-------------------------------------------------------------------------------------------------
+
+
+Driver  //驱动，运行用户编写的程序代码的主机
+Executor  //执行的spark driver提交的job，内部含有附加组件比如receiver
+		  //receiver接收数据并以block的方式保存在memory中，同时将数据块复制到其他executor中
+		  //以备容错，每个批次末端会形成新的DStream，交给下游处理
+		  //如果receiver故障，其他执行器中的receiver会启动进行数据的接收
+
+spark streaming容错处理
+
+Executor故障  解决方法：通过写前日志（wal）到hdfs
+如果Driver故障 
+	配置Driver程序自动重启，使的用特定clustermanager实现
+	重启时，从宕机的地方进行重启，通过检查点机制就可以实现该功能
+	ssc.checkpoint("")
+	sparkstraming上下文不再使用new方式，而是通过工厂方式创建，因为这样Driver重启时就会检查检查点
+
+编写容错Driver端的sparkstreaming，不会容错executor端
+package com.wyd.spark.javacode;
+
+import org.apache.spark.SparkConf;
+import org.apache.spark.api.java.Optional;
+import org.apache.spark.api.java.function.FlatMapFunction;
+import org.apache.spark.api.java.function.Function0;
+import org.apache.spark.api.java.function.Function2;
+import org.apache.spark.api.java.function.PairFunction;
+import org.apache.spark.streaming.Duration;
+import org.apache.spark.streaming.Seconds;
+import org.apache.spark.streaming.api.java.JavaDStream;
+import org.apache.spark.streaming.api.java.JavaPairDStream;
+import org.apache.spark.streaming.api.java.JavaReceiverInputDStream;
+import org.apache.spark.streaming.api.java.JavaStreamingContext;
+import scala.Tuple2;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.List;
+
+/**
+ * Created by Administrator on 2017/4/3.
+ */
+public class JavaSparkStreamingWordCountWindowsApp {
+    static JavaReceiverInputDStream sock;
+    public static void main(String[] args) throws Exception {
+        Function0<JavaStreamingContext> contextFactory = new Function0<JavaStreamingContext>() {
+            //首次创建context时调用该方法。
+            public JavaStreamingContext call() {
+                SparkConf conf = new SparkConf();
+                conf.setMaster("local[4]");
+                conf.setAppName("wc");
+                JavaStreamingContext jssc = new JavaStreamingContext(conf,new Duration(2000));
+                JavaDStream<String> lines = jssc.socketTextStream("localhost",9999);
+
+                /*******  变换代码放到此处 ***********/
+                JavaDStream<Long> dsCount = lines.countByWindow(new Duration(24 * 60 * 60 * 1000),new Duration(2000));
+                dsCount.print();
+                //设置检察点目录
+                jssc.checkpoint("file:///Users/wangyadi/checkpoint");
+                return jssc;
+            }
+        };
+        //失败重建时会经过检查点。
+        JavaStreamingContext context = JavaStreamingContext.getOrCreate("file:///Users/wangyadi/checkpoint", contextFactory);
+
+        context.start();
+        context.awaitTermination();
+    }
+}
+具体看
+https://blog.csdn.net/shujuelin/article/details/82928011
+
+----------------------------------------------------------------------------------------------------
+
+机器学习
+	监督学习
+		有训练数据集，规范数据，可能是人工处理的数据，有标签的数据
+		拿到训练数据，训练，产生推断函数（模型）
+		然后对新数据应用函数得到结果（预测）
+
+		分类也叫类别化，利用已知的数据来判断新数据如何分类到一个类别集合中，分类是监督学习的一种
+			应用：垃圾邮件判断
+	非监督学习
+		没有训练数据，就是有数据但没有标签
+		聚类：从一堆数据中，找出每个数据点的坐标，计算位置，把位置相近的点归为一类
+			k-Mean：k个均值
+		聚类是非监督学习，根据共同的特点对相似的数据进行聚簇
+			新闻分类
+
+	推荐
+		协同过滤
+			商品推荐
+
+
+
+
+
+
+
+皮尔森算法
+	分布在二维坐标系上的两个点距离越近，或者它们到原点连成的线的夹角越小，它们两个越相似
+	两个点和原点之间的夹角的余弦值，余弦值越接近，越相似
+
+spark上有两个学习库
+mllib 操作rdd
+ml   操作dataframe
+
+spark机器学习库
+
+Estimator 评估器
+	运行在包含了feature和label的dataFrame之上，对数据进行训练创建model，该模型用于以后的预测
+				特征    结果
+Transformer
+	将包含featuure的Dataframe变换成包含了预测的dataframe
+	由Estimator产生的model就是一个transformer
+Parameter
+	Estimator和Transformer使用的数据，通常和机器学习的算法相关
+	Spark API给出Lee一致性API针对算法
+Pipeline
+	将Estimetors和Transformer组合在一起，形成一个机器学习工作流
+
+
+
+
+http://archive.ics.uci.edu/ml/index.php 数据网站
+http://archive.ics.uci.edu/ml/datasets/Wine+Quality
+
+--------------------------------------------------------------------------------------------
+
+spark存入hbase
+
+object SparkToHBaseNew {
+  def main(args: Array[String]) {
+    if (args.length < 1) {
+      System.err.println("Usage: SparkToHBaseNew <input file>")
+      System.exit(1)
+    }
+    val conf = new SparkConf().setAppName("SparkToHBaseNew")
+    val sc = new SparkContext(conf)
+    val input = sc.textFile(args(0))
+    val hConf = HBaseConfiguration.create()
+    hConf.set(HConstants.ZOOKEEPER_QUORUM, "www.iteblog.com:2181")
+    val jobConf = new JobConf(hConf, this.getClass)
+    jobConf.set(TableOutputFormat.OUTPUT_TABLE, "iteblog")
+    //设置job的输出格式
+    val job = Job.getInstance(jobConf)
+    job.setOutputKeyClass(classOf[ImmutableBytesWritable])
+    job.setOutputValueClass(classOf[Result])
+    job.setOutputFormatClass(classOf[TableOutputFormat[ImmutableBytesWritable]])
+    val data = input.map { item =>
+      val Array(key, value) = item.split("\t")
+      val rowKey = key.reverse
+      val put = new Put(Bytes.toBytes(rowKey))
+      put.add(Bytes.toBytes("f1"), Bytes.toBytes("info"), Bytes.toBytes(value))
+      (new ImmutableBytesWritable, put)
+    }
+    //保存到HBase表
+    data.saveAsNewAPIHadoopDataset(job.getConfiguration)
+    sc.stop()
+  }
+}
+
+--------------------------------------------------------------------------------------------
+
+//把项目jar包导出来
+mvn -DoutputDirectory=./lib -DgroupId=com.wyd -DartifactId=calllogsystem -Dversion=1.0-SNAPSHOT dependency:copy-dependencies
+//然后新建一个文件夹把lib目录仍进去
+//然后用idea打包源码
+
+//lib下的jar包列转行列出类路径
+find . | echo `xargs` > a.txt
+
+然后修改a.txt  run.sh
+加上
+
+#!/bin/bash
+java -cp ./conf:./calllogsystem-1.0-SNAPSHOT.jar:./lib/commons-logging-1.2.jar:./lib/hadoop-auth-2.5.1.jar:./lib/jsr305-1.3.9.jar:./lib/activation-1.1.jar:./lib/commons-configuration-1.6.jar:./lib/hbase-common-1.2.7.jar:./lib/commons-beanutils-1.7.0.jar:./lib/xz-1.0.jar:./lib/commons-httpclient-3.1.jar:./lib/stax-api-1.0-2.jar:./lib/apacheds-i18n-2.0.0-M15.jar:./lib/hadoop-annotations-2.5.1.jar:./lib/slf4j-log4j12-1.7.21.jar:./lib/slf4j-api-1.6.1.jar:./lib/kafka-clients-0.10.0.1.jar:./lib/httpclient-4.2.5.jar:./lib/jline-0.9.94.jar:./lib/guava-12.0.1.jar:./lib/jaxb-api-2.2.2.jar:./lib/junit-4.12.jar:./lib/jopt-simple-4.9.jar:./lib/scala-parser-combinators_2.11-1.0.4.jar:./lib/log4j-1.2.15.jar:./lib/avro-1.7.4.jar:./lib/commons-cli-1.2.jar:./lib/netty-all-4.0.50.Final.jar:./lib/commons-digester-1.8.jar:./lib/protobuf-java-2.5.0.jar:./lib/hadoop-yarn-common-2.5.1.jar:./lib/xmlenc-0.52.jar:./lib/jetty-util-6.1.26.jar:./lib/commons-codec-1.9.jar:./lib/hbase-annotations-1.2.7.jar:./lib/jcodings-1.0.8.jar:./lib/commons-compress-1.4.1.jar:./lib/joni-2.1.2.jar:./lib/hbase-client-1.2.7.jar:./lib/hadoop-yarn-api-2.5.1.jar:./lib/metrics-core-2.2.0.jar:./lib/commons-io-2.4.jar:./lib/jackson-core-asl-1.9.13.jar:./lib/scala-library-2.11.8.jar:./lib/mail-1.4.jar:./lib/hadoop-mapreduce-client-core-2.5.1.jar:./lib/commons-beanutils-core-1.8.0.jar:./lib/hbase-protocol-1.2.7.jar:./lib/netty-3.7.0.Final.jar:./lib/paranamer-2.3.jar:./lib/zookeeper-3.4.6.jar:./lib/commons-collections-3.2.2.jar:./lib/api-asn1-api-1.0.0-M20.jar:./lib/apacheds-kerberos-codec-2.0.0-M15.jar:./lib/hamcrest-core-1.3.jar:./lib/hadoop-common-2.5.1.jar:./lib/api-util-1.0.0-M20.jar:./lib/commons-net-3.1.jar:./lib/commons-lang-2.6.jar:./lib/lz4-1.3.0.jar:./lib/jsch-0.1.42.jar:./lib/snappy-java-1.1.2.6.jar:./lib/commons-el-1.0.jar:./lib/httpcore-4.2.4.jar:./lib/jackson-mapper-asl-1.9.13.jar:./lib/commons-math3-3.1.1.jar:./lib/zkclient-0.8.jar:./lib/findbugs-annotations-1.3.9-1.jar:./lib/htrace-core-3.1.0-incubating.jar:./lib/kafka_2.11-0.10.0.1.jar com.wyd.callogconsumer.HbaseConsumer
+
+
+把配置文件导到./conf里去，把空格替换成:，加上自己的源码jar包
+
+
+<finalName>webtest</finalName>
+    <pluginManagement><!-- lock down plugins versions to avoid using Maven defaults (may be moved to parent pom) -->
+      <plugins>
+        <plugin>
+          <groupId>org.apache.tomcat.maven</groupId>
+          <artifactId>tomcat7-maven-plugin</artifactId>
+          <configuration>
+            <port>8080</port>
+            <path>/</path>
+            <uriEncoding>UTF-8</uriEncoding>
+          </configuration>
+        </plugin>
+        <plugin>
+          <artifactId>maven-clean-plugin</artifactId>
+          <version>3.1.0</version>
+        </plugin>
+        <!-- see http://maven.apache.org/ref/current/maven-core/default-bindings.html#Plugin_bindings_for_war_packaging -->
+        <plugin>
+          <artifactId>maven-resources-plugin</artifactId>
+          <version>3.0.2</version>
+        </plugin>
+        <plugin>
+          <artifactId>maven-compiler-plugin</artifactId>
+          <version>3.8.0</version>
+        </plugin>
+        <plugin>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>2.22.1</version>
+        </plugin>
+        <plugin>
+          <artifactId>maven-war-plugin</artifactId>
+          <version>3.2.2</version>
+        </plugin>
+        <plugin>
+          <artifactId>maven-install-plugin</artifactId>
+          <version>2.5.2</version>
+        </plugin>
+        <plugin>
+          <artifactId>maven-deploy-plugin</artifactId>
+          <version>2.8.2</version>
+        </plugin>
+
+      </plugins>
+    </pluginManagement>
+
+
+
+shuffle后内存溢出 
+shuffle内存溢出的情况可以说都是shuffle后，单个文件过大导致的。在Spark中，join，reduceByKey这一类型的过程，都会有shuffle的过程，在shuffle的使用，需要传入一个partitioner，大部分Spark中的shuffle操作，默认的partitioner都是HashPatitioner，默认值是父RDD中最大的分区数,这个参数通过spark.default.parallelism控制(在spark-sql中用spark.sql.shuffle.partitions) ， spark.default.parallelism参数只对HashPartitioner有效，所以如果是别的Partitioner或者自己实现的Partitioner就不能使用spark.default.parallelism这个参数来控制shuffle的并发量了。如果是别的partitioner导致的shuffle内存溢出，就需要从partitioner的代码增加partitions的数量。
+--------------------- 
+版权声明：本文为CSDN博主「为了九亿少女的期待」的原创文章，遵循CC 4.0 by-sa版权协议，转载请附上原文出处链接及本声明。
+原文链接：https://blog.csdn.net/Lwj879525930/article/details/82559596shuffle后内存溢出 
+shuffle内存溢出的情况可以说都是shuffle后，单个文件过大导致的。在Spark中，join，reduceByKey这一类型的过程，都会有shuffle的过程，在shuffle的使用，需要传入一个partitioner，大部分Spark中的shuffle操作，默认的partitioner都是HashPatitioner，默认值是父RDD中最大的分区数,这个参数通过spark.default.parallelism控制(在spark-sql中用spark.sql.shuffle.partitions) ， spark.default.parallelism参数只对HashPartitioner有效，所以如果是别的Partitioner或者自己实现的Partitioner就不能使用spark.default.parallelism这个参数来控制shuffle的并发量了。如果是别的partitioner导致的shuffle内存溢出，就需要从partitioner的代码增加partitions的数量。
+--------------------- 
+版权声明：本文为CSDN博主「为了九亿少女的期待」的原创文章，遵循CC 4.0 by-sa版权协议，转载请附上原文出处链接及本声明。
+原文链接：https://blog.csdn.net/Lwj879525930/article/details/82559596
+
+
+
+spark的优化怎么做？ 
+
+答： spark调优比较复杂，但是大体可以分为三个方面来进行，
+
+1）平台层面的调优：防止不必要的jar包分发，提高数据的本地性，选择高效的存储格式如parquet，
+
+2）应用程序层面的调优：过滤操作符的优化降低过多小任务，降低单条记录的资源开销，处理数据倾斜，复用RDD进行缓存，作业并行化执行等等，
+
+3）JVM层面的调优：设置合适的资源量，设置合理的JVM，启用高效的序列化方法如kyro，增大off head内存等等
+
+序列化在分布式系统中扮演着重要的角色，优化Spark程序时，首当其冲的就是对序列化方式的优化。Spark为使用者提供两种序列化方式：
+ 
+Java serialization: 默认的序列化方式。
+ 
+Kryo serialization: 相较于 Java serialization 的方式，速度更快，空间占用更小，但并不支持所有的序列化格式，同时使用的时候需要注册class。spark-sql中默认使用的是kyro的序列化方式。
+可以在spark-default.conf设置全局参数，也可以代码中初始化时对SparkConf设置 conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer") ，该参数会同时作用于机器之间数据的shuffle操作以及序列化rdd到磁盘，内存。
+Spark不将Kyro设置成默认的序列化方式是因为它需要对类进行注册，官方强烈建议在一些网络数据传输很大的应用中使用kyro序列化。
+
+
+
+如果你要序列化的对象比较大，可以增加参数spark.kryoserializer.buffer所设置的值。
+
+如果你没有注册需要序列化的class，Kyro依然可以照常工作，但会存储每个对象的全类名(full class name)，这样的使用方式往往比默认的 Java serialization 还要浪费更多的空间。
+
+可以设置 spark.kryo.registrationRequired 参数为 true，使用kyro时如果在应用中有类没有进行注册则会报错：
+
+如上这个错误需要添加
+--------------------- 
+版权声明：本文为CSDN博主「为了九亿少女的期待」的原创文章，遵循CC 4.0 by-sa版权协议，转载请附上原文出处链接及本声明。
+原文链接：https://blog.csdn.net/Lwj879525930/article/details/82559596
+
+
+=====================================================================================
+
+新sparkstreaming调优
+
+从多个kafka topic中接收数据，可以用多个Reciver接收，然后合并在一起进行处理
+package com.bawei.sparksteaming.tuning
+
+import org.apache.kafka.clients.consumer.ConsumerRecord
+import org.apache.kafka.common.serialization.StringDeserializer
+import org.apache.spark.SparkConf
+import org.apache.spark.streaming.dstream.{DStream, InputDStream}
+import org.apache.spark.streaming.kafka010.{ConsumerStrategies, KafkaUtils, LocationStrategies}
+import org.apache.spark.streaming.{Seconds, StreamingContext}
+import scala.collection.immutable
+object MultipleReceiveFromKafka {
+
+  def main(args: Array[String]): Unit = {
+    val conf = new SparkConf().setMaster("local[*]").setAppName("MultipleReceiveFromKafka")
+    val ssc = new StreamingContext(conf, Seconds(30))
+    val kafkaParams = Map[String, Object](
+      "bootstrap.servers" -> "node4:9092",
+      "key.deserializer" -> classOf[StringDeserializer],
+      "value.deserializer" -> classOf[StringDeserializer],
+      "group.id" -> "use_a_separate_group_id_for_each_stream",
+      "auto.offset.reset" -> "earliest", //latest
+      "enable.auto.commit" -> (false: java.lang.Boolean)
+    )
+    val topics = Array("topic1","topic2","topic3","topic4","topic5")
+    val numStreams = 5
+
+    val kafkaStreams: immutable.IndexedSeq[InputDStream[ConsumerRecord[String, String]]] = (1 to numStreams).map(i => KafkaUtils.createDirectStream[String, String](
+      ssc,
+      LocationStrategies.PreferConsistent,
+      ConsumerStrategies.Subscribe[String, String](Array(topics(i-1)), kafkaParams)
+    ))
+    val singleDStream: DStream[ConsumerRecord[String, String]] = ssc.union(kafkaStreams)
+    singleDStream.foreachRDD(kafkaRDD => {
+    })
+    ssc.start()
+    ssc.stop()
+  }
+}
+
+===============================================
+应考虑的另一个参数是 receiver’s block interval（接收器的块间隔），这由configuration parameter（配置参数） 的 spark.streaming.blockInterval 决定。对于大多数 receivers（接收器），接收到的数据 coalesced（合并）在一起存储在 Spark 内存之前的 blocks of data（数据块）
+
+每个 receiver（接收器）每 batch（批次）的任务数量将是大约（batch interval（批间隔）/ block interval（块间隔））
+
+例如，200 ms的 block interval（块间隔）每 2 秒 batches（批次）创建 10 个 tasks（任务）
+如果你集群里有40个cpu核，那么10个任务只能用10个核，还有30个核空闲着，所以，要增大批次间隔或调小block interval
+这时，我把block interval调整到100ms，再把批次间隔调整到4秒，这样正好等于40核，但是要有个富余量，可以把批次间隔调整为3.5秒
+
+推荐的 block interval（块间隔）最小值约为 50ms，低于此任务启动开销可能是一个问题。
+
+=================================================
+conf
+spark.default.parallelism  建议设置为集群中cpu总核数
+
+===============================================
+
+使用kryo替换spark的默认序列化器
+
+//spark需要序列化的地方
+1、receiver接收器
+2、persist持久化
+3、reduceBy。。。。时
+4、广播变量时
+
+conf
+.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer") //设置kryo为序列化器
+      .registerKryoClasses(Array(classOf[String],classOf[Array[(Long, Long, String)]],classOf[Student]))  //设置要序列化的类
+
+============================================================
+
+数据批次Job执行的时间不要大于batchsize的时间
+
+=============================================================
+
+调节堆内存 transmission和persist内存使用占比
+spark中，堆内存又被划分成了两块儿，一块儿是专门用来给RDD的cache、persist操作进行RDD数据缓存用的；另外一块儿，就是我们刚才所说的，用来给spark算子函数的运行使用的，存放函数中自己创建的对象。默认情况下，给RDD cache操作的内存占比是0.6，即60%的内存都给了cache操作了。但是问题是，如果某些情况下cache占用的内存并不需要占用那么大，这个时候可以将其内存占比适当降低。怎么判断在什么时候调整RDD cache的内存占用比呢？其实通过Spark监控平台就可以看到Spark作业的运行情况了，如果发现task频繁的gc，就可以去调整cache的内存占用比了。通过SparkConf.set("spark.storage.memoryFraction","0.6")来设定。
+
+//如果你程序中不用cache或者cache的数据很小，就可以减小这个占比
+SparkConf.set("spark.storage.memoryFraction","0.6")
+
+--------------------------------------------------------
+
+调节堆内存 shuffle和persist的内存使用占比
+spark.shuffle.memoryFraction
+参数说明：该参数用于设置shuffle过程中一个task拉取到上个stage的task的输出后，进行聚合操作时能够使用的Executor内存的比例，默认是0.2。也就是说，Executor默认只有20%的内存用来进行该操作。shuffle操作在进行聚合时，如果发现使用的内存超出了这个20%的限制，那么多余的数据就会溢写到磁盘文件中去，此时就会极大地降低性能。
+参数调优建议：如果Spark作业中的RDD持久化操作较少，shuffle操作较多时，建议降低持久化操作的内存占比，提高shuffle操作的内存占比比例，避免shuffle过程中数据过多时内存不够用，必须溢写到磁盘上，降低了性能。此外，如果发现作业由于频繁的gc导致运行缓慢，意味着task执行用户代码的内存不够用，那么同样建议调低这个参数的值。
+
+====================================================================
+
+executor在yarn上运行时要调优的参数
+
+--conf  spark.yarn.executor.memoryOverhead=2048
+
+        在spark-submit脚本里面添加如上配置。默认情况下，这个堆外内存上限大概是384多M；我们通常项目中真正处理大数据的时候，这里都会出现问题导致spark作业反复崩溃无法运行；此时就会去调节这个参数，到至少1G或者更大的内存。通常这个参数调节上去以后，就会避免掉某些OOM的异常问题，同时呢，会让整体spark作业的性能，得到较大的提升。
+
+executor执行的时候，用的内存可能会超过executor-memoy，所以会为executor额外预留一部分内存。spark.yarn.executor.memoryOverhead代表了这部分内存
+
+
+
+yarn.scheduler.maximum-allocation-mb
+这个参数表示每个container能够申请到的最大内存，一般是集群统一配置。Spark中的executor进程是跑在container中，所以container的最大内存会直接影响到executor的最大可用内存。当你设置一个比较大的内存时，日志中会报错
+
+
+spark-submit --conf spark.yarn.executor.memoryOverhead=2048
+
+
+===================================================================
+
+调节堆外内存
+
+为了进一步优化内存的使用以及提高 Shuffle 时排序的效率，Spark 引入了堆外（Off-heap）内存，使之可以直接在工作节点的系统内存中开辟空间，存储经过序列化的二进制数据。利用 JDK Unsafe API（从 Spark 2.0 开始，在管理堆外的存储内存时不再基于 Tachyon，而是与堆外的执行内存一样，基于 JDK Unsafe API 实现[3]），Spark 可以直接操作系统堆外内存，减少了不必要的内存开销，以及频繁的 GC 扫描和回收，提升了处理性能。堆外内存可以被精确地申请和释放，而且序列化的数据占用的空间可以被精确计算，所以相比堆内内存来说降低了管理的难度，也降低了误差。
+
+在默认情况下堆外内存并不启用，可通过配置 spark.memory.offHeap.enabled 参数启用，并由 spark.memory.offHeap.size 参数设定堆外空间的大小。除了没有 other 空间，堆外内存与堆内内存的划分方式相同，所有运行中的并发任务共享存储内存和执行内存。
+
+======================================================================
+
+连接等待时长的调整
+由于JVM内存过小，导致频繁的Minor gc，有时候更会触犯full gc，一旦出发full gc；此时所有程序暂停，导致无法建立网络连接；spark默认的网络连接的超时时长是60s；如果卡住60s都无法建立连接的话，那么就宣告失败了。
+
+
+bin/spark-submit \
+--conf spark.core.connection.ack.wait.timeout=300 \
+--conf spark.yarn.executor.memoryOverhead=2048 \
+
+==========================================================================
+
+spark Java GC的高级调整
+
+----------------------------------
+
+监测垃圾回收
+我们可以对垃圾回收进行监测，包括多久进行一次垃圾回收，以及每次垃圾回收耗费的时间。只要在spark-submit脚本中，增加一个配置即可，
+--conf "spark.executor.extraJavaOptions=-verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps" 
+
+----------------------------------------
+如果发现，在task执行期间，大量full gc发生了，那么说明，年轻代的Eden区域，给的空间不够大。此时可以执行一些操作来优化垃圾回收行为：
+1、包括降低spark.storage.memoryFraction的比例，给年轻代更多的空间，来存放短时间存活的对象；
+2、给Eden区域分配更大的空间，使用-Xmn即可，通常建议给Eden区域，预计大小的4/3；
+3、如果使用的是HDFS文件，那么很好估计Eden区域大小，如果每个executor有4个task，然后每个hdfs压缩块解压缩后大小是3倍，此外每个hdfs块的大小是64M，那么Eden区域的预计大小就是：4 * 3 * 64MB，然后呢，再通过-Xmn参数，将Eden区域大小设置为4 * 3 * 64 * 4/3。
+
+一些高级的参数
+-XX:SurvivorRatio=4：如果值为4，那么就是两个Survivor跟Eden的比例是2:4，也就是说每个Survivor占据的年轻代的比例是1/6，所以，你其实也可以尝试调大Survivor区域的大小。
+-XX:NewRatio=4：调节新生代和老年代的比例, 表示年轻代与年老代所占比值为1:4,年轻代占整个堆栈的1/5
+Xms=Xmx 并且设置了Xmn的情况下，该参数不需要进行设置。
+
+最后一点总结
+对于垃圾回收的调优，尽量就是说，调节executor内存的比例就可以了。因为jvm的调优是非常复杂和敏感的。真的到了万不得已的地方，并且对jvm相关的技术很了解，那么再进行eden区域的调节，调优。
+
+-------------------------------------------
+
+更换垃圾回收器
+
+如果分配给单个Executor的Heap足够大(我认为超过32G)时使用G1  -XX:+UseG1GC -XX:NewRatio=8
+如果内存不够32G，使用Parallel  -XX:+UseParallelGC -XX:+UseParallelOldGC
+
+使用G1可能也可能引起Executor异常退出，这时有两种解决方法： 
+1.1. 减少cores数量(就是减少当前Executor并行task的数量) 
+1.2. 增加老年代内存
+
+-----------------------------------------------
+bin/spark-submit --class org.apache.spark.examples.SparkPi  --master yarn --deploy-mode cluster --driver-memory 1g --executor-memory 1g --executor-cores 2 --queue default examples/jars/spark-examples_2.11-2.4.0.jar 10000
+提交实例
+bin/spark-submit \
+--master yarn \
+--deploy-mode cluster \
+--executor-memory 36g \
+--executor-cores 2 \
+--num-executors 10 \  #设置大小受限于集群中节点数量？集群5个节点，申请10个executors，结果只返回4个executors
+--queue default \
+--driver-memory 2g \
+--conf "spark.executor.extraJavaOptions=-XX:+UseG1GC -XX:NewRatio=8"
+--conf spark.core.connection.ack.wait.timeout=300
+--conf spark.yarn.executor.memoryOverhead=10240
+--conf spark.storage.memoryFraction=0.5
+--conf spark.shuffle.memoryFraction=0.5
+--conf spark.default.parallelism=20 #executor-cores * num-executors
+--conf "spark.executorEnv.JAVA_HOME=/usr/java/jdk1.8.0_131" \
+--conf "spark.yarn.appMasterEnv.JAVA_HOME=/usr/java/jdk1.8.0_131"
+
+
+1.选择垃圾回收器
+
+如果分配给单个Executor的Heap足够大(我认为超过32G)时使用G1，否则使用Parallel。因为如果在Heap小于32G时使用G1，G1 region size默认小于16M，可能引发Humongous对象分配问题。 
+
+当然，使用G1可能也可能引起Executor异常退出，这时有两种解决方法： 
+
+1.1. 减少cores数量(就是减少当前Executor并行task的数量) 
+
+1.2. 增加老年代内存
+
+
+
+2.测试验证GC参数
+
+硬件环境：(64G+8cores+42T) * 4，用yarn管理，利用Spark SQL对124G,169个字段的数据用row_number函数除重，除重前1.6亿条，除重后1.5亿条：
+
+
+
+executor-memory	executor-cores	extraJavaOptions	Max GC Time	Job Duration
+20g	10	-XX:+UseG1GC	60s	32min
+30g	20	-XX:+UseG1GC	2.0 min	27min
+36g	20	-XX:+UseG1GC	1.8 min	26min
+36g	20	-XX:+UseG1GC -XX:NewRatio=8	11 s	23min
+36g	22	-XX:+UseG1GC -XX:NewRatio=8	17 s	25min
+36g	28	-XX:+UseG1GC -XX:NewRatio=8 -XXConcGCThreads=20	28 s	22min
+20g	20	-XX:+UseParallelGC -XX:+UseParallelOldGC	50s	25min
+36g	20	-XX:+UseParallelGC -XX:+UseParallelOldGC	17s	25min
+20g	20	-XX:+UseConcMarkSweepGC -XX:+UseParNewGC	1.9min	42min
+36g	20	-XX:+UseConcMarkSweepGC -XX:+UseParNewGC	1.7min	34min
+
+
+
+

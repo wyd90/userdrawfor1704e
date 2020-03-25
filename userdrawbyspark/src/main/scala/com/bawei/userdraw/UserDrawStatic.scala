@@ -22,6 +22,9 @@ object UserDrawStatic {
   def main(args: Array[String]): Unit = {
 
     val conf = new SparkConf().setMaster("local[*]").setAppName("userdraw")
+    conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+      .registerKryoClasses(Array(classOf[(String,String)],classOf[String]))
+
     val sc = new SparkContext(conf)
 
     //读取用户每天的日志信息
