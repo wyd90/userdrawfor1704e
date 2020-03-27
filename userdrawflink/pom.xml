@@ -13,6 +13,7 @@
         <scala.version>2.11.8</scala.version>
         <flink.version>1.7.2</flink.version>
         <encoding>UTF-8</encoding>
+        <package.scope>compile</package.scope>
     </properties>
 
     <dependencies>
@@ -27,14 +28,14 @@
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-java</artifactId>
             <version>${flink.version}</version>
-            <scope>provided</scope>
+            <scope>${package.scope}</scope>
         </dependency>
         <!-- https://mvnrepository.com/artifact/org.apache.flink/flink-streaming-java -->
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-streaming-java_2.11</artifactId>
             <version>${flink.version}</version>
-            <scope>provided</scope>
+            <scope>${package.scope}</scope>
         </dependency>
 
         <!-- https://mvnrepository.com/artifact/org.apache.flink/flink-scala -->
@@ -42,7 +43,7 @@
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-scala_2.11</artifactId>
             <version>${flink.version}</version>
-            <scope>provided</scope>
+            <scope>${package.scope}</scope>
         </dependency>
 
         <!-- https://mvnrepository.com/artifact/org.apache.flink/flink-streaming-scala -->
@@ -50,7 +51,7 @@
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-streaming-scala_2.11</artifactId>
             <version>${flink.version}</version>
-            <scope>provided</scope>
+            <scope>${package.scope}</scope>
         </dependency>
 
 
@@ -59,7 +60,7 @@
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-statebackend-rocksdb_2.11</artifactId>
             <version>${flink.version}</version>
-            <scope>provided</scope>
+            <scope>${package.scope}</scope>
         </dependency>
 
         <!-- https://mvnrepository.com/artifact/org.apache.flink/flink-connector-kafka-0.11 -->
@@ -67,14 +68,14 @@
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-connector-kafka-0.11_2.11</artifactId>
             <version>${flink.version}</version>
-            <scope>provided</scope>
+            <scope>${package.scope}</scope>
         </dependency>
 
         <dependency>
             <groupId>org.apache.kafka</groupId>
             <artifactId>kafka-clients</artifactId>
             <version>0.11.0.3</version>
-            <scope>provided</scope>
+            <scope>${package.scope}</scope>
         </dependency>
 
         <dependency>
@@ -93,7 +94,6 @@
             <groupId>redis.clients</groupId>
             <artifactId>jedis</artifactId>
             <version>3.0.1</version>
-            <scope>provided</scope>
         </dependency>
 
         <dependency>
