@@ -11,6 +11,12 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.windowing.AllWindowFunction;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
+import org.apache.flink.streaming.connectors.fs.StringWriter;
+import org.apache.flink.streaming.connectors.fs.bucketing.BucketingSink;
+import org.apache.flink.streaming.connectors.fs.bucketing.DateTimeBucketer;
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer011;
 import org.apache.flink.util.Collector;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -22,6 +28,7 @@ import redis.clients.jedis.Jedis;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.URI;
+import java.time.ZoneId;
 import java.util.*;
 
 public class OrderCaulculate {
@@ -85,7 +92,7 @@ public class OrderCaulculate {
                 String province = IpUtil.searchIp(rules, value.f1);
                 conn.incrByFloat(province,value.f6);
 
-                return value.f0;
+                return value.toString();
             }
             @Override
             public void close() throws Exception {
@@ -93,7 +100,34 @@ public class OrderCaulculate {
             }
         });
 
+        //缺点：数据在flink的内存中
+//        SingleOutputStreamOperator<String> applied = ordersum.timeWindowAll(Time.hours(1)).apply(new AllWindowFunction<String, String, TimeWindow>() {
+//            @Override
+//            public void apply(TimeWindow window, Iterable<String> values, Collector<String> out) throws Exception {
+//                for (String value : values) {
+//                    out.collect(value);
+//                }
+//            }
+//        });
+
+
+        //缺点，产生大量小文件
+        BucketingSink<String> sink = new BucketingSink<String>("hdfs://node4:8020/flinksinktest");
+        sink.setBucketer(new DateTimeBucketer<String>("yyyy-MM-dd-HH", ZoneId.of("Asia/Shanghai")));
+        sink.setWriter(new StringWriter<>());
+        sink.setBatchSize(1024 * 1024 * 400); // this is 400 MB,
+        sink.setBatchRolloverInterval(60 * 60  * 1000L); // this is 60 mins
+
+//        org.apache.hadoop.conf.Configuration conf = new org.apache.hadoop.conf.Configuration();
+//        conf.set("fs.defaultFS","file:///");
+//        sink.setFSConfig(conf);
+        ordersum.addSink(sink);
+
         //ordersum.print();
+
+        //以上两种都不太好
+        //你再写回kafka-topic中
+        //用flume读kafka存到hdfs上，一小时滚动一次
 
         env.execute();
 

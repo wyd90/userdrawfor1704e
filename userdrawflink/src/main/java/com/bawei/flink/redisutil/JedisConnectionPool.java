@@ -27,15 +27,4 @@ public class JedisConnectionPool {
         return jedisPool.getResource();
     }
 
-
-    public static void main(String[] args) {
-        Jedis conn = JedisConnectionPool.getConnection();
-        Set<String> keys = conn.keys("*");
-        for(String key : keys) {
-            String value = conn.get(key);
-            System.out.println(key + "=" + value);
-        }
-        conn.close();
-    }
-
 }
